@@ -2,6 +2,8 @@
 
 # ATS Mini — RESONIK PL+ Edition (`ats-mini-resonik-pl`)
 
+> **Pełna polska instrukcja obsługi:** zobacz **[INSTRUKCJA.md](INSTRUKCJA.md)**
+
 Zmodyfikowana, polska edycja firmware'u dla kieszonkowego odbiornika **ATS Mini (ESP32-S3 + SI4732, OSPI 8 MB PSRAM / 16 MB Flash)**, zbudowana na bazie otwartoźródłowego projektu **[ep3mhb/resonik-ats-mini](https://github.com/ep3mhb/resonik-ats-mini) (v2.45-r4)** oraz **[esp32-si4732/ats-mini](https://github.com/esp32-si4732/ats-mini)**.
 
 ### Co dodano w wersji PL+

@@ -11,6 +11,7 @@
 #include "CwAudio.h"
 #include "Ft8.h"
 #include "Scope.h"
+#include "Weather.h"
 
 //
 // Draw preferences write indicator
@@ -549,6 +550,13 @@ void drawScreen()
   if(currentCmd==CMD_SCOPE)
   {
     drawScopePage();
+    return;
+  }
+
+  // Live Krakow weather page (PL+)
+  if(currentCmd==CMD_WEATHER)
+  {
+    drawWeatherPage();
     return;
   }
 

@@ -1208,7 +1208,7 @@ void loop()
   // Disable commands control
   if((currentTime - elapsedCommand) > ELAPSED_COMMAND)
   {
-    if(currentCmd != CMD_NONE && currentCmd != CMD_SEEK && currentCmd != CMD_SCAN && currentCmd != CMD_MEMORY && currentCmd != CMD_CWDEC && currentCmd != CMD_RTTY && currentCmd != CMD_SCOPE && currentCmd != CMD_FT8 && currentCmd != CMD_WIFISETUP)
+    if(currentCmd != CMD_NONE && currentCmd != CMD_SEEK && currentCmd != CMD_SCAN && currentCmd != CMD_MEMORY && currentCmd != CMD_CWDEC && currentCmd != CMD_RTTY && currentCmd != CMD_SCOPE && currentCmd != CMD_WEATHER && currentCmd != CMD_FT8 && currentCmd != CMD_WIFISETUP)
     {
       tileReturnCancel();
       currentCmd = CMD_NONE;

@@ -17,6 +17,7 @@
 #include "Storage.h"
 #include "WifiSetup.h"
 #include "Scope.h"
+#include "Weather.h"
 
 #include <time.h>
 
@@ -118,24 +119,24 @@ int8_t menuIdx = MENU_VOLUME;
 
 static const char *menu[] =
 {
-  "Mode",
-  "Band",
-  "Volume",
+  "Tryb",
+  "Pasmo",
+  "Glosnosc",
   "VFO A/B",
-  "Step",
-  "Seek",
-  "Scan",
-  "Memory",
+  "Krok",
+  "Szukaj",
+  "Skanuj",
+  "Pamiec",
   "Squelch",
-  "Bandwidth",
+  "Szerokosc",
   "AGC/ATTN",
   "AVC",
   "SoftMute",
-  "Beacons",
-  "Mem Scan",
-  "Scanner",
-  "Scope",
-  "Settings",
+  "Beacony",
+  "Skan Pam.",
+  "Skaner",
+  "Widmo",
+  "Ustawienia",
 };
 
 //
@@ -177,52 +178,54 @@ static const char *menu[] =
 #define MENU_PERF         32  // RESONIK R3
 #define MENU_ABOUT        33
 #define MENU_RTTY         34  // PL+: RTTY / NAVTEX decoder
+#define MENU_WEATHER      35  // PL+: Krakow weather
 // RESONIK R4: Wi-Fi mode, Wi-Fi Power and joining a network are one item,
 // "Wi-Fi" (MENU_WIFIMODE), which opens the Wi-Fi page (WifiSetup.cpp)
 
 
 static uint8_t updateFwIdx = 0;
-static const char *const updateFwActions[] = {"Check", "Update"};
+static const char *const updateFwActions[] = {"Sprawdz", "Aktualizuj"};
 
 int8_t settingsIdx = MENU_BRIGHTNESS;
 
 static const char *settings[] =
 {
-  "Brightness",
-  "Date/Time",
-  "Time Zone",
-  "Sleep Timer",
-  "Sleep Mode",
-  "Off Timer",
-  "Theme",
-  "UI Layout",
-  "Zoom Menu",
-  "Scroll Dir.",
+  "Jasnosc",
+  "Data/Czas",
+  "Strefa",
+  "Usypianie",
+  "Tryb Snu",
+  "Wylacznik",
+  "Motyw",
+  "Uklad UI",
+  "Powieksz",
+  "Kierunek",
   "RDS",
   "FM Stereo",
-  "FM Region",
-  "Calibration",
-  "DSP Patches",
-  "Load EiBi",
-  "Update FW",
-  "USB Port",
-  "TCP Port",
+  "Region FM",
+  "Kalibracja",
+  "Patche DSP",
+  "Pob. EiBi",
+  "Aktualiz.",
+  "Port USB",
+  "Port TCP",
   "Bluetooth",
   "Wi-Fi",
-  "Band Plan",
+  "Plan Pasm",
   "Auto Att.",
-  "Menu Style",
+  "Styl Menu",
   "Logger",
-  "Propagation",
-  "Knob",
-  "CW Decoder",
-  "CW Strip",
-  "Plan Area",
+  "Propagacja",
+  "Enkoder",
+  "Dekoder CW",
+  "Pasek CW",
+  "Obszar",
   "FT8/FT4",
-  "Freq Lock",
+  "Blokada",
   "CPU",
-  "About",
+  "O Radiu",
   "RTTY/NVTX",
+  "Pogoda",
 };
 
 //
@@ -272,6 +275,7 @@ static const TileEntry tileHam[] =
   { TI_CWSTRIP, TILE_SET | MENU_CWSTRIP }, { TI_FT8, TILE_SET | MENU_FT8 },
   { TI_DOWNLOAD, TILE_SET | MENU_LOADEIBI },
   { TI_GLOBE, TILE_SET | MENU_BPAREA }, { TI_PROP, TILE_SET | MENU_PROPAG },
+  { TI_PROP, TILE_SET | MENU_WEATHER },
 };
 static const TileEntry tileDisplay[] =
 {
@@ -293,11 +297,11 @@ static const TileEntry tileSystem[] =
 
 static const TileCategory tileCategories[] =
 {
-  { "Tuning",    TI_DIAL,     tileTuning,  ITEM_COUNT(tileTuning)  },
+  { "Strojenie", TI_DIAL,     tileTuning,  ITEM_COUNT(tileTuning)  },
   { "Audio",     TI_VOLUME,   tileAudio,   ITEM_COUNT(tileAudio)   },
-  { "Memory",    TI_MEMORY,   tileMemory,  ITEM_COUNT(tileMemory)  },
-  { "Ham & SWL", TI_BEACON,   tileHam,     ITEM_COUNT(tileHam)     },
-  { "Display",   TI_BRIGHT,   tileDisplay, ITEM_COUNT(tileDisplay) },
+  { "Pamiec",    TI_MEMORY,   tileMemory,  ITEM_COUNT(tileMemory)  },
+  { "Ham i SWL", TI_BEACON,   tileHam,     ITEM_COUNT(tileHam)     },
+  { "Ekran",     TI_BRIGHT,   tileDisplay, ITEM_COUNT(tileDisplay) },
   { "System",    TI_SETTINGS, tileSystem,  ITEM_COUNT(tileSystem)  },
 };
 
@@ -1793,6 +1797,7 @@ static void clickSettings(int cmd, bool shortPress)
     case MENU_LOGGER:     currentCmd = CMD_LOGGER;    break;
     case MENU_CWDEC:      cwPageOpen();               break;
     case MENU_RTTY:       rttyPageOpen();             break;
+    case MENU_WEATHER:    weatherOpen();              break;
     case MENU_FT8:        ft8PageOpen();              break;
     case MENU_CWSTRIP:    currentCmd = CMD_CWSTRIP;   break;
     case MENU_PROPAG:
@@ -1940,6 +1945,10 @@ bool clickHandler(uint16_t cmd, bool shortPress)
       break;
     case CMD_SCOPE:
       scopeClick(shortPress);
+      break;
+    case CMD_WEATHER:
+      if(shortPress) currentCmd = CMD_NONE;
+      else weatherOpen();
       break;
     case CMD_WIFISETUP:
       wifiSetupClick(shortPress);

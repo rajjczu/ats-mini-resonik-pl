@@ -65,6 +65,7 @@
 #define CMD_WIFISETUP  0x4500 // RESONIK R4: Wi-Fi Setup page (network list and keyboard)
 #define CMD_SCOPE      0x4600 // PL+: Full-screen Band Scope
 #define CMD_RTTY       0x4700 // PL+: Full-screen RTTY / NAVTEX decoder
+#define CMD_WEATHER    0x4800 // PL+: Live Krakow weather page
 
 // Band plan settings (RESONIK)
 #define BANDPLAN_OFF       0
