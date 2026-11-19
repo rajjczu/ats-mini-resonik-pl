@@ -8,13 +8,35 @@
 #include <HTTPClient.h>
 #include <NetworkClientSecure.h>
 
-static const char *WEATHER_URL =
-  "https://api.open-meteo.com/v1/forecast?latitude=50.0647&longitude=19.9450"
-  "&current=temperature_2m,relative_humidity_2m,pressure_msl,wind_speed_10m,weather_code";
+struct CityCoord
+{
+  const char *name;
+  const char *lat;
+  const char *lon;
+};
+
+static const CityCoord cities[] =
+{
+  { "Krakow",     "50.0647", "19.9450" },
+  { "Zakopane",   "49.2992", "19.9496" },
+  { "Tarnow",     "50.0121", "20.9858" },
+  { "Nowy Sacz",  "49.6218", "20.6970" },
+  { "Katowice",   "50.2649", "19.0238" },
+  { "Warszawa",   "52.2297", "21.0122" },
+  { "Wroclaw",    "51.1079", "17.0385" },
+  { "Poznan",     "52.4064", "16.9252" },
+  { "Gdansk",     "54.3520", "18.6466" },
+  { "Rzeszow",    "50.0412", "21.9991" },
+  { "Lodz",       "51.7592", "19.4560" },
+  { "Szczecin",   "53.4285", "14.5528" },
+};
+
+static int8_t cityIdx = 0;
 
 struct WeatherInfo
 {
   bool valid = false;
+  int8_t city = -1;
   float tempC = 0.0f;
   int humidity = 0;
   float pressureHpa = 0.0f;
@@ -53,14 +75,20 @@ static const char *wmoDesc(int code)
 bool weatherFetch()
 {
   if(getWiFiStatus() < 2) return false;
-  if(wxData.valid && millis() - wxFetched < 15UL * 60UL * 1000UL) return true;
+  if(wxData.valid && wxData.city == cityIdx && millis() - wxFetched < 15UL * 60UL * 1000UL) return true;
+
+  char url[192];
+  snprintf(url, sizeof(url),
+           "https://api.open-meteo.com/v1/forecast?latitude=%s&longitude=%s"
+           "&current=temperature_2m,relative_humidity_2m,pressure_msl,wind_speed_10m,weather_code",
+           cities[cityIdx].lat, cities[cityIdx].lon);
 
   NetworkClientSecure client;
   client.setInsecure();
   HTTPClient http;
   http.setTimeout(6000);
   http.setConnectTimeout(6000);
-  if(!http.begin(client, WEATHER_URL)) return false;
+  if(!http.begin(client, url)) return false;
   http.setUserAgent(getUserAgent());
   int code = http.GET();
   bool ok = false;
@@ -82,6 +110,7 @@ bool weatherFetch()
         wxData.pressureHpa = p;
         wxData.windKmh = w;
         wxData.code = (int)(c + 0.5f);
+        wxData.city = cityIdx;
         wxData.valid = true;
         wxFetched = millis();
         ok = true;
@@ -96,40 +125,60 @@ void weatherOpen()
 {
   if(getWiFiStatus() >= 2)
   {
-    statusShow("Pogoda Krakow", "Pobieranie...", 0);
+    char title[32];
+    snprintf(title, sizeof(title), "Pogoda: %s", cities[cityIdx].name);
+    statusShow(title, "Pobieranie...", 0);
     drawScreen();
-    if(!weatherFetch()) statusShow("Pogoda Krakow", "Brak odpowiedzi");
+    if(!weatherFetch()) statusShow(title, "Brak odpowiedzi");
     else statusShow("");
   }
   currentCmd = CMD_WEATHER;
 }
 
+void weatherTurn(int16_t enc)
+{
+  const int n = (int)(sizeof(cities) / sizeof(cities[0]));
+  int next = (int)cityIdx + (enc > 0 ? 1 : -1);
+  if(next < 0) next = n - 1;
+  if(next >= n) next = 0;
+  cityIdx = (int8_t)next;
+}
+
 void drawWeatherPage()
 {
-  const uint16_t bg = 0x041F;
   const uint16_t deep = 0x0108;
   const uint16_t hdr = 0x09C9;
   const uint16_t yellow = 0xFFE0;
   const uint16_t cyan = 0x07FF;
   const uint16_t muted = 0x9CD3;
-  (void)bg;
 
   spr.fillSprite(deep);
   spr.fillRect(0, 0, 320, 28, hdr);
   spr.setTextDatum(ML_DATUM);
   spr.setTextColor(0xFFFF);
-  spr.drawString("Pogoda: Krakow", 10, 14, uiFont(false));
+  char hbuf[32];
+  snprintf(hbuf, sizeof(hbuf), "Pogoda: %s", cities[cityIdx].name);
+  spr.drawString(hbuf, 10, 14, uiFont(false));
   spr.setTextDatum(MR_DATUM);
   spr.setTextColor(cyan);
   spr.drawString("Open-Meteo", 310, 14, uiFont(true));
 
-  if(!wxData.valid)
+  if(!wxData.valid || wxData.city != cityIdx)
   {
     spr.setTextDatum(MC_DATUM);
     spr.setTextColor(yellow);
-    spr.drawString(getWiFiStatus() < 2 ? "Brak polaczenia Wi-Fi" : "Nie pobrano danych", 160, 82, uiFont(false));
-    spr.setTextColor(muted);
-    spr.drawString("Wlacz Wi-Fi: System -> Wi-Fi", 160, 108, uiFont(true));
+    if(getWiFiStatus() < 2)
+    {
+      spr.drawString("Brak polaczenia Wi-Fi", 160, 82, uiFont(false));
+      spr.setTextColor(muted);
+      spr.drawString("Wlacz Wi-Fi: System -> Wi-Fi", 160, 108, uiFont(true));
+    }
+    else
+    {
+      spr.drawString(cities[cityIdx].name, 160, 76, uiFont(false));
+      spr.setTextColor(muted);
+      spr.drawString("Kliknij galke, aby pobrac pogode", 160, 106, uiFont(true));
+    }
   }
   else
   {
@@ -168,6 +217,6 @@ void drawWeatherPage()
 
   spr.setTextDatum(BC_DATUM);
   spr.setTextColor(muted);
-  spr.drawString("Klik: odswiez   Przytrzymaj: wyjscie", 160, 168, uiFont(true));
+  spr.drawString("Obrot: miasto  Klik: pobierz  Press: wyjscie", 160, 168, uiFont(true));
   spr.pushSprite(0, 0);
 }

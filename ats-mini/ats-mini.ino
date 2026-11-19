@@ -26,6 +26,7 @@
 #include "WifiSetup.h"
 #include "WebControl.h"
 #include "Scope.h"
+#include "Weather.h"
 #include <stdlib.h>
 #include <time.h>
 
@@ -998,6 +999,10 @@ bool handleRotation(int16_t enc, int16_t accelerated, bool pressed)
         break;
       case CMD_SCOPE:
         scopeTurn(enc);
+        changed = true;
+        break;
+      case CMD_WEATHER:
+        weatherTurn(enc);
         changed = true;
         break;
       case CMD_WIFISETUP:

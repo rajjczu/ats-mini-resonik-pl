@@ -4,6 +4,7 @@
 #include <stdint.h>
 
 void weatherOpen();
+void weatherTurn(int16_t enc);
 bool weatherFetch();
 void drawWeatherPage();
 
