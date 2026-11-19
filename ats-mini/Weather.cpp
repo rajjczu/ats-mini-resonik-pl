@@ -8,9 +8,6 @@
 #include <HTTPClient.h>
 #include <NetworkClientSecure.h>
 
-extern const uint8_t caBundleStart[] asm("_binary_src_cacert_pem_start");
-extern const uint8_t caBundleEnd[]   asm("_binary_src_cacert_pem_end");
-
 static const char *WEATHER_URL =
   "https://api.open-meteo.com/v1/forecast?latitude=50.0647&longitude=19.9450"
   "&current=temperature_2m,relative_humidity_2m,pressure_msl,wind_speed_10m,weather_code";
@@ -59,7 +56,7 @@ bool weatherFetch()
   if(wxData.valid && millis() - wxFetched < 15UL * 60UL * 1000UL) return true;
 
   NetworkClientSecure client;
-  client.setCACertBundle(caBundleStart, caBundleEnd - caBundleStart);
+  client.setInsecure();
   HTTPClient http;
   http.setTimeout(6000);
   http.setConnectTimeout(6000);
