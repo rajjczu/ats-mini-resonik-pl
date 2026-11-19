@@ -1,0 +1,609 @@
+#include "Common.h"
+#include "Storage.h"
+#include "Utils.h"
+#include "Menu.h"
+#include "TcpMode.h"
+#include "Web.h"
+
+#include <atomic>
+#include <WiFi.h>
+#include <esp_sntp.h>
+#include <esp_wifi.h>
+#include <ESPmDNS.h>
+#include <HTTPClient.h>
+#include "HttpDate.h"
+#include "Resonik.h"
+
+#define CONNECT_TIME  3000  // Time of inactivity to start connecting WiFi
+#define WIFI_TOTAL_TIMEOUT  30000
+#define WIFI_ATTEMPT_TIMEOUT  5000
+#define WIFI_DISCOVERY_TIMEOUT  15000 // Leave time to connect after probing hidden APs
+#define NTP_TIMEOUT  45000 // Allow startup delay and fallback to the third server
+#define HTTP_TIME_AFTER 12000 // No NTP reply by then: read the time from a web server instead
+#define HTTP_TIME_TRIES 3     // Web attempts at 12, 22 and 32 s, all before NTP_TIMEOUT
+
+#ifndef WIFI_POWER_LEVEL
+#define WIFI_POWER_LEVEL WIFI_POWER_17dBm
+#endif
+
+enum class NetState : uint8_t { Idle, Scanning, Probing, Connecting, Retry, Online };
+static NetState netState = NetState::Idle;
+static uint8_t activeNetMode = NET_OFF;
+static uint32_t netStarted, attemptStarted;
+static std::atomic<bool> connectRequested{false};
+static std::atomic<bool> timeSynchronized{false};
+// Retain NTP precedence over RDS even if the user resets clock validity.
+static bool ntpHasTime = false;
+// HTTP Date fallback attempts on this connection, for networks that block or delay NTP.
+static uint8_t httpTimeTried = 0;
+static bool httpTimeSync(uint32_t *epoch);
+static char timeSyncDiag[48] = "";
+
+//
+// RESONIK: web requests (time from a web server, propagation data) run in a
+// background task. They can take many seconds when the network is slow or
+// blocks them, and in the main loop that froze the knob, the menu and the
+// screen (test build 9b log: 8 s, 24 s and 36 s stalls after reconnects).
+//
+#define NET_JOB_TIME 1
+#define NET_JOB_PROP 2
+static TaskHandle_t netJobTask = nullptr;
+static std::atomic<uint8_t> netJobs{0};
+static std::atomic<bool> netJobBusy{false};
+static std::atomic<int8_t> httpTimeResult{-1};   // -1 none yet, 0 failed, 1 epoch ready
+static std::atomic<uint32_t> httpTimeEpoch{0};
+
+static void netJobWork(void *)
+{
+  for(;;)
+  {
+    ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+    for(;;)
+    {
+      // Busy first, then take the jobs: netStop() sees one or the other
+      netJobBusy = true;
+      uint8_t jobs = netJobs.exchange(0);
+      if(!jobs) { netJobBusy = false; break; }
+      if(jobs & NET_JOB_TIME)
+      {
+        uint32_t epoch = 0;
+        bool ok = getWiFiStatus() >= 2 && httpTimeSync(&epoch);
+        httpTimeEpoch = epoch;
+        httpTimeResult = ok ? 1 : 0;
+      }
+      if(jobs & NET_JOB_PROP) propagationFetch();
+      netJobBusy = false;
+    }
+  }
+}
+
+// A web request is running or waiting. Wi-Fi must not be switched off under
+// it: that crashes the network stack (test build 11 rebooted on the FT8 page).
+bool netJobsBusy() { return(netJobBusy || netJobs != 0); }
+
+static void netJobStart(uint8_t jobs)
+{
+  // Core 0, beside the Wi-Fi stack; TLS needs the large stack
+  if(!netJobTask && xTaskCreatePinnedToCore(netJobWork, "netjob", 12288, nullptr, 1, &netJobTask, 0) != pdPASS)
+  {
+    netJobTask = nullptr;
+    return;
+  }
+  netJobs |= jobs;
+  xTaskNotifyGive(netJobTask);
+}
+
+// Keep the strongest identified AP for each of the three saved networks.
+struct WiFiNetwork
+{
+  String ssid, password;
+  int32_t rssi;
+  int32_t channel;
+  uint8_t bssid[6];
+  bool tried;
+  bool open;
+};
+static WiFiNetwork wifiNetworks[3];
+// Scan results stay alive while hidden APs are identified using saved credentials.
+static int probeAP = 0;
+static uint8_t probeNetwork = 0;
+
+//
+// Access Point (AP) mode settings
+//
+static const char *apSSID    = RECEIVER_NAME;
+static const char *apPWD     = 0;       // No password
+static const int   apChannel = 10;      // WiFi channel number (1..13)
+static const bool  apHideMe  = false;   // TRUE: disable SSID broadcast
+static const int   apClients = 3;       // Maximum simultaneous connected clients
+
+static bool itIsTimeToWiFi = false; // TRUE: Need to connect to WiFi
+static uint32_t connectTime = 0;
+
+static bool wifiScanHidden = false;
+
+static void wifiInitAP();
+static void wifiStartScan();
+static void wifiTryNext();
+static void wifiProbeNext();
+static void wifiRememberAP(WiFiNetwork &network, int index);
+static void wifiConnected(uint32_t now);
+static void wifiConnectionFailed();
+static void wifiRegisterPowerLevelCallback();
+static void wifiPowerLevelOnEvent(WiFiEvent_t event);
+
+//
+// Delayed WiFi connection
+//
+void netSetScanHidden(bool enabled)
+{
+  wifiScanHidden = enabled;
+}
+
+void netRequestConnect()
+{
+  // The web callback runs on another task. The main loop owns the deadline.
+  connectRequested.store(true);
+}
+
+bool netTickTime()
+{
+  bool changed = false;
+  uint32_t now = millis();
+
+  if(connectRequested.exchange(false))
+  {
+    connectTime = now;
+    itIsTimeToWiFi = true;
+  }
+  if(itIsTimeToWiFi && now - connectTime > CONNECT_TIME)
+  {
+    netInit(wifiModeIdx);
+    now = millis();
+  }
+
+  if(timeSynchronized.exchange(false))
+  {
+    // SNTP has already set system time. Only the main task touches receiver state.
+    ntpHasTime = true;
+    clockTimeSynchronized();
+    changed = true;
+    // RESONIK: while online, also fetch propagation data (in the background;
+    // not in Sync mode, which switches Wi-Fi off right away)
+    if(netState == NetState::Online && activeNetMode != NET_SYNC) netJobStart(NET_JOB_PROP);
+    if(netState == NetState::Online && activeNetMode == NET_SYNC)
+    {
+      netStop();
+      statusShow("Time synchronized");
+    }
+  }
+
+  // Accept a completed connection before checking its overall timeout.
+  // Probe associations are handled separately and do not start network services.
+  if(netState == NetState::Scanning || netState == NetState::Connecting || netState == NetState::Retry)
+  {
+    if(WiFi.status() == WL_CONNECTED)
+    {
+      wifiConnected(now);
+      return true;
+    }
+    if(now - netStarted >= WIFI_TOTAL_TIMEOUT)
+    {
+      wifiConnectionFailed();
+      return changed;
+    }
+  }
+
+  switch(netState)
+  {
+    case NetState::Idle:
+      break;
+
+    case NetState::Scanning:
+    {
+      int count = WiFi.scanComplete();
+      if(count != WIFI_SCAN_RUNNING)
+      {
+        for(auto &network : wifiNetworks)
+        {
+          network.rssi = INT32_MIN;
+          network.channel = 0;
+          network.tried = false;
+          network.open = false;
+          for(int i = 0; i < count; ++i)
+            if(network.ssid.length() && WiFi.SSID(i) == network.ssid && WiFi.RSSI(i) > network.rssi)
+              wifiRememberAP(network, i);
+        }
+        probeAP = probeNetwork = 0;
+        wifiProbeNext();
+      }
+      break;
+    }
+
+    case NetState::Probing:
+    {
+      // Association is enough to identify an AP; do not wait for DHCP during probes.
+      bool connected = WiFi.STA.connected();
+      bool discoveryExpired = now - netStarted >= WIFI_DISCOVERY_TIMEOUT;
+      if(connected || discoveryExpired || now - attemptStarted >= WIFI_ATTEMPT_TIMEOUT)
+      {
+        if(connected)
+        {
+          wifiRememberAP(wifiNetworks[probeNetwork], probeAP);
+          ++probeAP;
+          probeNetwork = 0;
+        }
+        else
+          ++probeNetwork;
+        WiFi.disconnect();
+        wifiProbeNext();
+      }
+      break;
+    }
+
+    case NetState::Connecting:
+      if(now - attemptStarted >= WIFI_ATTEMPT_TIMEOUT)
+      {
+        WiFi.disconnect();
+        wifiTryNext();
+      }
+      break;
+
+    case NetState::Retry:
+      if(now - attemptStarted >= 1000) wifiStartScan();
+      break;
+
+    case NetState::Online:
+    {
+      // Result of a web time request made in the background
+      int8_t result = httpTimeResult.exchange(-1);
+      if(result == 1 && clockSetEpoch(httpTimeEpoch.load()))
+      {
+        httpTimeTried = HTTP_TIME_TRIES;   // Done for this connection
+        changed = true;
+        if(activeNetMode != NET_SYNC) netJobStart(NET_JOB_PROP);
+        if(activeNetMode == NET_SYNC)
+        {
+          netStop();
+          statusShow("Time set from web");
+        }
+        break;
+      }
+      // Retry: right after joining Wi-Fi, DNS and routing are sometimes not ready yet.
+      // Not again on every reconnect (FT8 and CW pages pause Wi-Fi) once the clock
+      // is set, unless the user asked for a time sync.
+      if(!ntpHasTime && httpTimeTried < HTTP_TIME_TRIES && !netJobBusy &&
+         (activeNetMode == NET_SYNC || !clockAvailable()) &&
+         now - attemptStarted >= HTTP_TIME_AFTER + httpTimeTried * 10000u)
+      {
+        httpTimeTried++;
+        netJobStart(NET_JOB_TIME);
+      }
+      if(activeNetMode == NET_SYNC && now - attemptStarted >= NTP_TIMEOUT)
+      {
+        netStop();
+        statusShow("Time sync failed", timeSyncDiag[0] ? timeSyncDiag : nullptr, 20000);
+      }
+      break;
+    }
+  }
+  return changed;
+}
+
+//
+// Get current connection status
+// (-1 - not connected, 0 - disabled, 1 - connected, 2 - connected to network)
+//
+int8_t getWiFiStatus()
+{
+  wifi_mode_t mode = WiFi.getMode();
+
+  switch(mode)
+  {
+    case WIFI_MODE_NULL:
+      return(0);
+    case WIFI_AP:
+      return(WiFi.softAPgetStationNum()? 1 : -1);
+    case WIFI_STA:
+      return(WiFi.status()==WL_CONNECTED? 2 : -1);
+    case WIFI_AP_STA:
+      return((WiFi.status()==WL_CONNECTED)? 2 : WiFi.softAPgetStationNum()? 1 : -1);
+    default:
+      return(-1);
+  }
+}
+
+char *getWiFiIPAddress()
+{
+  static char ip[16];
+  return strcpy(ip, WiFi.status()==WL_CONNECTED ? WiFi.localIP().toString().c_str() : "");
+}
+
+//
+// Stop WiFi hardware
+//
+void netStop()
+{
+  // Let a running web request finish first (its own timeouts end it); one
+  // still waiting is dropped. Pages that pause Wi-Fi wait for netJobsBusy()
+  // to clear instead, so this only waits when the user switches Wi-Fi off.
+  netJobs = 0;
+  for(uint32_t t = millis(); netJobBusy && millis() - t < 15000; ) delay(20);
+
+  // Online owns the SNTP client, including while waiting for the first reply.
+  if(netState == NetState::Online) esp_sntp_stop();
+  netState = NetState::Idle;
+  itIsTimeToWiFi = false;
+  connectRequested.store(false);
+  timeSynchronized.store(false);
+  WiFi.setAutoReconnect(false);
+  esp_wifi_scan_stop();
+  tcpStop();
+  MDNS.end();
+  // Disabling WiFi stops both interfaces and any pending connection.
+  WiFi.mode(WIFI_MODE_NULL);
+  WiFi.scanDelete();
+  statusShow(nullptr);
+}
+
+//
+// Initialize WiFi network and services
+//
+void netInit(uint8_t netMode)
+{
+  // Always disable WiFi first
+  netStop();
+  wifiRegisterPowerLevelCallback();
+
+  if(netMode == NET_OFF) return;
+  wifi_mode_t mode = WIFI_STA;
+  if(netMode == NET_AP_ONLY) mode = WIFI_AP;
+  else if(netMode == NET_AP_CONNECT) mode = WIFI_AP_STA;
+  WiFi.mode(mode);
+  if(netMode == NET_AP_ONLY || netMode == NET_AP_CONNECT) wifiInitAP();
+
+  activeNetMode = netMode;
+
+  // Load saved station credentials and scan preferences.
+  prefs.begin("network", true, STORAGE_PARTITION);
+  wifiScanHidden = prefs.getBool("wifiscanhidden", false);
+  for(int i = 0; i < 3; ++i)
+  {
+    char key[16];
+    snprintf(key, sizeof(key), "wifissid%d", i + 1);
+    wifiNetworks[i].ssid = prefs.getString(key, "");
+    snprintf(key, sizeof(key), "wifipass%d", i + 1);
+    wifiNetworks[i].password = prefs.getString(key, "");
+  }
+  prefs.end();
+
+  if(netMode != NET_SYNC)
+  {
+    webInit();
+    MDNS.begin("atsmini");
+    MDNS.addService("http", "tcp", 80);
+  }
+
+  if(netMode > NET_AP_ONLY)
+  {
+    if(!wifiNetworks[0].ssid.length() && !wifiNetworks[1].ssid.length() && !wifiNetworks[2].ssid.length())
+    {
+      wifiConnectionFailed();
+      return;
+    }
+    netStarted = millis();
+    statusShow("Connecting to WiFi network...", nullptr, 0);
+    wifiStartScan();
+  }
+  else
+    statusShow("Use Access Point " RECEIVER_NAME, "IP : 10.1.1.1 or atsmini.local");
+}
+
+bool ntpIsAvailable()
+{
+  return ntpHasTime;
+}
+
+static void wifiRegisterPowerLevelCallback()
+{
+  static bool registered = false;
+
+  if(registered) return;
+
+  WiFi.onEvent(wifiPowerLevelOnEvent, ARDUINO_EVENT_WIFI_AP_START);
+  WiFi.onEvent(wifiPowerLevelOnEvent, ARDUINO_EVENT_WIFI_STA_START);
+  registered = true;
+}
+
+// Transmit power from the Wi-Fi Power setting (RESONIK R3): Low and Lowest
+// help boards that reset when Wi-Fi transmits, and save some battery
+static wifi_power_t wifiTxPower()
+{
+  switch(wifiPowerIdx)
+  {
+    case 1:  return(WIFI_POWER_13dBm);
+    case 2:  return(WIFI_POWER_8_5dBm);
+    default: return(WIFI_POWER_LEVEL);
+  }
+}
+
+void wifiApplyTxPower()
+{
+  if(WiFi.getMode() != WIFI_MODE_NULL) WiFi.setTxPower(wifiTxPower());
+}
+
+static void wifiPowerLevelOnEvent(WiFiEvent_t event)
+{
+  (void)event;
+  WiFi.setTxPower(wifiTxPower());
+}
+
+//
+// Initialize WiFi access point (AP)
+//
+static void wifiInitAP()
+{
+  // These are our own access point (AP) addresses
+  IPAddress ip(10, 1, 1, 1);
+  IPAddress gateway(10, 1, 1, 1);
+  IPAddress subnet(255, 255, 255, 0);
+
+  // Start as access point (AP)
+  WiFi.softAP(apSSID, apPWD, apChannel, apHideMe, apClients);
+  WiFi.softAPConfig(ip, gateway, subnet);
+}
+
+//
+// Connect to a WiFi network
+//
+static void wifiStartScan()
+{
+  netState = NetState::Scanning;
+  WiFi.scanNetworks(true, wifiScanHidden);
+}
+
+static void wifiRememberAP(WiFiNetwork &network, int index)
+{
+  network.rssi = WiFi.RSSI(index);
+  network.channel = WiFi.channel(index);
+  network.open = WiFi.encryptionType(index) == WIFI_AUTH_OPEN;
+  memcpy(network.bssid, WiFi.BSSID(index), sizeof(network.bssid));
+}
+
+static void wifiProbeNext()
+{
+  int count = WiFi.scanComplete();
+  while(wifiScanHidden && probeAP < count && millis() - netStarted < WIFI_DISCOVERY_TIMEOUT)
+  {
+    if(!WiFi.SSID(probeAP).length())
+    {
+      while(probeNetwork < ITEM_COUNT(wifiNetworks))
+      {
+        auto &network = wifiNetworks[probeNetwork];
+        if(!network.ssid.length() || WiFi.RSSI(probeAP) <= network.rssi)
+        {
+          ++probeNetwork;
+          continue;
+        }
+        // A successful association identifies this anonymous BSSID before ranking it.
+        netState = NetState::Probing;
+        attemptStarted = millis();
+        const char *password = WiFi.encryptionType(probeAP) == WIFI_AUTH_OPEN || !network.password.length() ?
+          nullptr : network.password.c_str();
+        WiFi.begin(network.ssid.c_str(), password, WiFi.channel(probeAP), WiFi.BSSID(probeAP));
+        return;
+      }
+    }
+    ++probeAP;
+    probeNetwork = 0;
+  }
+  WiFi.scanDelete();
+  wifiTryNext();
+}
+
+static void wifiTryNext()
+{
+  WiFiNetwork *best = nullptr;
+  for(auto &network : wifiNetworks)
+    if(network.ssid.length() && !network.tried && network.channel &&
+       (!best || network.rssi > best->rssi))
+      best = &network;
+
+  if(!best)
+  {
+    netState = NetState::Retry;
+    attemptStarted = millis();
+    return;
+  }
+
+  best->tried = true;
+  attemptStarted = millis();
+  netState = NetState::Connecting;
+  const char *password = best->open || !best->password.length() ? nullptr : best->password.c_str();
+  WiFi.begin(best->ssid.c_str(), password, best->channel, best->bssid);
+}
+
+static void wifiConnected(uint32_t now)
+{
+  WiFi.scanDelete();
+  WiFi.setAutoReconnect(true);
+  timeSynchronized.store(false);
+  esp_sntp_set_time_sync_notification_cb([](struct timeval *) {
+    timeSynchronized.store(true);
+  });
+  esp_sntp_set_sync_interval(4 * 60 * 60 * 1000);
+  // Three servers so one blocked or slow pool does not leave the clock unset
+  // The last one is Cloudflare by IP address, so time still works if DNS does not
+  configTime(0, 0, "atsmini.pool.ntp.org", "time.cloudflare.com", "162.159.200.123");
+  httpTimeTried = 0;
+  httpTimeResult = -1;
+  timeSyncDiag[0] = 0;
+  attemptStarted = now;
+  netState = NetState::Online;
+  if(activeNetMode == NET_SYNC)
+    statusShow("Synchronizing time...", nullptr, 0);
+  else
+    statusShow(("Connected to WiFi network (" + WiFi.SSID() + ")").c_str(),
+               ("IP : " + WiFi.localIP().toString() + " or atsmini.local").c_str());
+}
+
+static void wifiConnectionFailed()
+{
+  if(activeNetMode == NET_SYNC)
+    netStop();
+  else
+  {
+    netState = NetState::Idle;
+    esp_wifi_scan_stop();
+    WiFi.disconnect();
+    WiFi.scanDelete();
+  }
+  if(activeNetMode == NET_AP_CONNECT)
+    statusShow("No WiFi connection", "Use Access Point " RECEIVER_NAME " at 10.1.1.1");
+  else
+    statusShow("No WiFi connection");
+}
+
+//
+// Fallback clock source: the Date header of a plain HTTP reply.
+// Accurate to about a second, enough for the display clock and EiBi schedules.
+//
+static bool httpTimeSync(uint32_t *epochOut)
+{
+  // The second address is an IP literal: it works even when DNS is broken
+  static const char *urls[] = {
+    "http://www.google.com/generate_204",
+    "http://1.1.1.1/",
+  };
+  static const char *headers[] = { "Date" };
+  int codes[2] = { 0, 0 };
+
+  for(int i = 0 ; i < 2 ; i++)
+  {
+    HTTPClient http;
+    http.setTimeout(4000);
+    http.setConnectTimeout(4000);
+    if(!http.begin(urls[i])) continue;
+    http.setUserAgent(getUserAgent());
+    http.collectHeaders(headers, 1);
+    // Any reply carries a Date header, including the redirect from 1.1.1.1
+    codes[i] = http.sendRequest("HEAD");
+    String date = http.header("Date");
+    http.end();
+
+    uint32_t epoch;
+    if(codes[i] > 0 && httpDateToEpoch(date.c_str(), &epoch))
+    {
+      // Set by the main loop: this runs in the background task
+      *epochOut = epoch;
+      return(true);
+    }
+  }
+
+  // Shown on failure: DNS server, whether it resolves names, and the web results
+  IPAddress ip;
+  bool dnsOk = WiFi.hostByName("pool.ntp.org", ip) == 1;
+  snprintf(timeSyncDiag, sizeof(timeSyncDiag), "DNS %s %s, web %d/%d",
+    WiFi.dnsIP(0).toString().c_str(), dnsOk ? "ok" : "fail", codes[0], codes[1]);
+  return(false);
+}

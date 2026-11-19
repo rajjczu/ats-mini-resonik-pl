@@ -1,0 +1,141 @@
+ARDUINO_CLI := arduino-cli
+
+PROFILE	= esp32s3-ospi
+FQBN	= esp32.esp32.esp32s3
+INO	= ats-mini.ino
+ELF	= ./build/$(FQBN)/$(INO).elf
+PORT	?= /dev/cu.usbmodem1101
+
+DEBUG_LEVEL ?= 0
+
+#
+# BLE_POWER_LEVEL : BLE TX power level, for example ESP_PWR_LVL_N12
+# WIFI_POWER_LEVEL: WiFi TX power level, for example WIFI_POWER_13dBm
+#
+DEFINES = -DDEBUG=$(DEBUG_LEVEL)
+
+ifdef LILYGO_SI473X
+        DEFINES += -DLILYGO_SI473X
+endif
+
+ifdef BLE_POWER_LEVEL
+        DEFINES += -DBLE_POWER_LEVEL=$(BLE_POWER_LEVEL)
+endif
+
+ifdef WIFI_POWER_LEVEL
+        DEFINES += -DWIFI_POWER_LEVEL=$(WIFI_POWER_LEVEL)
+endif
+
+OPTIONS = \
+	--build-property "compiler.cpp.extra_flags=$(DEFINES)" \
+	--warnings all
+
+HEADERS = \
+	Parser.h ParserTypes.h ParserUtils.h ParserAdhoc.h \
+	Common.h Themes.h Menu.h Memories.h Storage.h Display.h Rotary.h \
+	Utils.h Button.h EIBI.h Remote.h BleMode.h TcpMode.h BlePeripheral.h \
+	BleUartPeripheral.h BleCentral.h BleHidCentral.h \
+	SI4735-fixed.h patch_init.h PatchParser.h Patches.h Splash.h Ota.h Web.h \
+	$(wildcard Page*.h)
+
+SRC = \
+	Parser.cpp ParserAdhoc.cpp \
+	$(INO) Utils.cpp Rotary.cpp Button.cpp Draw.cpp Menu.cpp Memories.cpp \
+	Station.cpp Battery.cpp Storage.cpp Themes.cpp Remote.cpp \
+	Network.cpp Web.cpp Patches.cpp Ota.cpp Splash.cpp EIBI.cpp Scan.cpp About.cpp BleMode.cpp TcpMode.cpp \
+	BlePeripheral.cpp BleUartPeripheral.cpp \
+	BleCentral.cpp BleHidCentral.cpp \
+	Layout-Default.cpp Layout-SMeter.cpp
+
+all: build
+
+help:
+	@echo 'Run this command to upload the firmware to your radio:'
+	@echo
+	@echo '  make upload PORT=/dev/cu.usbmodem1101'
+	@echo
+
+build: $(ELF)
+
+$(ELF): $(INO) $(SRC) $(HEADERS)
+	$(ARDUINO_CLI) compile -e -p $(PROFILE) $(OPTIONS)
+
+upload: build
+	$(ARDUINO_CLI) upload -m $(PROFILE) -p $(PORT)
+
+clean:
+	$(ARDUINO_CLI) cache clean
+	rm -Rf ./build/
+
+
+build/TestParser: tests/TestParser.cpp Parser.cpp Parser.h ParserTypes.h ParserUtils.h
+	mkdir -p build
+	$(CXX) $(CPPFLAGS) $(CXXFLAGS) -std=c++11 -Wall -Wextra -UNDEBUG tests/TestParser.cpp Parser.cpp $(LDFLAGS) -o $@
+
+build/TestParserAdhoc: tests/TestParserAdhoc.cpp ParserAdhoc.cpp ParserAdhoc.h Parser.cpp Parser.h ParserTypes.h ParserUtils.h Themes.h
+	mkdir -p build
+	$(CXX) $(CPPFLAGS) $(CXXFLAGS) -std=c++11 -Wall -Wextra -UNDEBUG tests/TestParserAdhoc.cpp ParserAdhoc.cpp Parser.cpp $(LDFLAGS) -o $@
+
+build/TestOtaVersion: tests/TestOtaVersion.cpp OtaVersion.h
+	@mkdir -p build
+	$(CXX) $(CPPFLAGS) $(CXXFLAGS) -std=c++11 -Wall -Wextra -UNDEBUG tests/TestOtaVersion.cpp $(LDFLAGS) -o $@
+
+build/TestHttpDate: tests/TestHttpDate.cpp HttpDate.h
+	@mkdir -p build
+	$(CXX) $(CPPFLAGS) $(CXXFLAGS) -std=c++11 -Wall -Wextra -UNDEBUG tests/TestHttpDate.cpp $(LDFLAGS) -o $@
+
+build/TestTimeZone: tests/TestTimeZone.cpp TimeZone.h
+	@mkdir -p build
+	$(CXX) $(CPPFLAGS) $(CXXFLAGS) -std=c++11 -Wall -Wextra -UNDEBUG tests/TestTimeZone.cpp $(LDFLAGS) -o $@
+
+build/TestBandPlan: tests/TestBandPlan.cpp BandPlan.h
+	@mkdir -p build
+	$(CXX) $(CPPFLAGS) $(CXXFLAGS) -std=c++11 -Wall -Wextra -UNDEBUG tests/TestBandPlan.cpp $(LDFLAGS) -o $@
+
+build/TestBatteryTime: tests/TestBatteryTime.cpp BatteryTime.h
+	@mkdir -p build
+	$(CXX) $(CPPFLAGS) $(CXXFLAGS) -std=c++11 -Wall -Wextra -UNDEBUG tests/TestBatteryTime.cpp $(LDFLAGS) -o $@
+
+build/TestBeacons: tests/TestBeacons.cpp Beacons.h
+	@mkdir -p build
+	$(CXX) $(CPPFLAGS) $(CXXFLAGS) -std=c++11 -Wall -Wextra -UNDEBUG tests/TestBeacons.cpp $(LDFLAGS) -o $@
+
+build/TestCatKenwood: tests/TestCatKenwood.cpp CatKenwood.h
+	@mkdir -p build
+	$(CXX) $(CPPFLAGS) $(CXXFLAGS) -std=c++11 -Wall -Wextra -UNDEBUG tests/TestCatKenwood.cpp $(LDFLAGS) -o $@
+
+build/TestPropagation: tests/TestPropagation.cpp Propagation.h
+	@mkdir -p build
+	$(CXX) $(CPPFLAGS) $(CXXFLAGS) -std=c++11 -Wall -Wextra -UNDEBUG tests/TestPropagation.cpp $(LDFLAGS) -o $@
+
+build/TestEibiParse: tests/TestEibiParse.cpp EibiParse.h
+	@mkdir -p build
+	$(CXX) $(CPPFLAGS) $(CXXFLAGS) -std=c++11 -Wall -Wextra -UNDEBUG tests/TestEibiParse.cpp $(LDFLAGS) -o $@
+
+build/TestCwDecoder: tests/TestCwDecoder.cpp CwDecoder.h
+	@mkdir -p build
+	$(CXX) $(CPPFLAGS) $(CXXFLAGS) -std=c++11 -Wall -Wextra -UNDEBUG tests/TestCwDecoder.cpp $(LDFLAGS) -o $@
+
+FT8_C = $(wildcard src/ft8/*.c)
+
+build/TestFt8: tests/TestFt8.cpp Ft8Rx.h $(FT8_C) $(wildcard src/ft8/*.h)
+	@mkdir -p build/ft8
+	for f in $(FT8_C); do $(CC) -O2 -c $$f -o build/ft8/$$(basename $$f .c).o || exit 1; done
+	$(CXX) $(CPPFLAGS) $(CXXFLAGS) -O2 -std=c++11 -Wall -Wextra -UNDEBUG tests/TestFt8.cpp build/ft8/*.o $(LDFLAGS) -lm -o $@
+
+test: build/TestParser build/TestParserAdhoc build/TestOtaVersion build/TestHttpDate build/TestTimeZone build/TestBandPlan build/TestBatteryTime build/TestBeacons build/TestCatKenwood build/TestPropagation build/TestEibiParse build/TestCwDecoder build/TestFt8
+	./build/TestParser
+	./build/TestParserAdhoc
+	./build/TestOtaVersion
+	./build/TestHttpDate
+	./build/TestTimeZone
+	./build/TestBandPlan
+	./build/TestBatteryTime
+	./build/TestBeacons
+	./build/TestCatKenwood
+	./build/TestPropagation
+	./build/TestEibiParse
+	./build/TestCwDecoder
+	./build/TestFt8
+
+.PHONY: all help build upload clean test

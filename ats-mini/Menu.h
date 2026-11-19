@@ -1,0 +1,219 @@
+#ifndef MENU_H
+#define MENU_H
+
+#include "Common.h"
+
+// Band Types
+#define FM_BAND_TYPE  0
+#define MW_BAND_TYPE  1
+#define SW_BAND_TYPE  2
+#define LW_BAND_TYPE  3
+
+// Commands
+#define CMD_NONE       0x0000
+#define CMD_FREQ       0x0100
+#define CMD_BAND       0x1000 //-MENU MODE starts here
+#define CMD_VOLUME     0x1100 // |
+#define CMD_AGC        0x1200 // |
+#define CMD_BANDWIDTH  0x1300 // |
+#define CMD_STEP       0x1400 // |
+#define CMD_MODE       0x1500 // |
+#define CMD_MENU       0x1600 // |
+#define CMD_SOFTMUTE   0x1700 // |
+#define CMD_AVC        0x1800 // |
+#define CMD_MEMORY     0x1900 // |
+#define CMD_SEEK       0x1A00 // |
+#define CMD_SCAN       0x1B00 // |
+#define CMD_SQUELCH    0x1C00 //-+
+#define CMD_SETTINGS   0x2000 //-SETTINGS MODE starts here
+#define CMD_BRT        0x2100 // |
+#define CMD_CAL        0x2200 // |
+#define CMD_RDS        0x2300 // |
+#define CMD_UTCOFFSET  0x2400 // |
+#define CMD_FM_REGION  0x2500 // |
+#define CMD_THEME      0x2600 // |
+#define CMD_UI         0x2700 // |
+#define CMD_ZOOM       0x2800 // |
+#define CMD_SCROLL     0x2900 // |
+#define CMD_SLEEP      0x2A00 // |
+#define CMD_SLEEPMODE  0x2B00 // |
+#define CMD_LOADEIBI   0x2C00 // |
+#define CMD_USBMODE    0x2D00 // |
+#define CMD_TCPMODE    0x2E00 // |
+#define CMD_BLEMODE    0x2F00 // |
+#define CMD_WIFIMODE   0x3000 // |
+#define CMD_DATETIME   0x3100 // |
+#define CMD_UPDATEFW   0x3200 // |
+#define CMD_FM_STEREO  0x3300 // |
+#define CMD_DSP_PATCHES 0x3400 // |
+#define CMD_ABOUT      0x3500 // |
+#define CMD_OFFTIMER   0x3600 // |
+#define CMD_BANDPLAN   0x3700 // | RESONIK
+#define CMD_AUTOATT    0x3800 // | RESONIK
+#define CMD_MENUSTYLE  0x3900 // | RESONIK
+#define CMD_LOGGER     0x3A00 // | RESONIK
+#define CMD_PROPAG     0x3B00 //-+ RESONIK
+#define CMD_BEACON     0x3C00 // RESONIK, main menu
+#define CMD_CWDEC      0x3D00 // RESONIK R3: full-screen CW decoder
+#define CMD_CWSTRIP    0x3E00 // RESONIK R3: decoder strip setting
+#define CMD_KNOB       0x3F00 // RESONIK: encoder type
+#define CMD_BPAREA     0x4000 // RESONIK R3: band plan area (region or country)
+#define CMD_FT8        0x4100 // RESONIK R3: full-screen FT8 decoder
+#define CMD_FREQLOCK   0x4200 // RESONIK R3: frequency lock
+#define CMD_WIFIPOWER  0x4300 // RESONIK R3: Wi-Fi transmit power
+#define CMD_PERF       0x4400 // RESONIK R3: processor speed
+#define CMD_WIFISETUP  0x4500 // RESONIK R4: Wi-Fi Setup page (network list and keyboard)
+#define CMD_SCOPE      0x4600 // PL+: Full-screen Band Scope
+#define CMD_RTTY       0x4700 // PL+: Full-screen RTTY / NAVTEX decoder
+
+// Band plan settings (RESONIK)
+#define BANDPLAN_OFF       0
+#define BANDPLAN_SCALE     1
+#define BANDPLAN_AUTO_SSB  2
+
+// Menu styles (RESONIK)
+#define MENU_STYLE_CLASSIC 0
+#define MENU_STYLE_TILES   1
+
+// UI Layouts
+#define UI_DEFAULT  0
+#define UI_SMETER   1
+
+// Seek modes
+#define SEEK_DEFAULT  0
+#define SEEK_SCHEDULE 1
+
+//
+// Data Types
+//
+
+typedef struct
+{
+  uint8_t idx;      // SI473X device bandwidth index
+  const char *desc; // Bandwidth description
+} Bandwidth;
+
+typedef struct
+{
+  uint32_t freq;    // Frequency in Hz
+  uint8_t band;
+  uint8_t mode;
+  int8_t stepIdx;
+  int8_t bandwidthIdx;
+} VfoState;
+
+typedef struct
+{
+  int step;         // Tuning step in Hz
+  const char *desc; // Step description
+  uint8_t spacing;  // Receiver seek spacing: 10 kHz for FM, 1 kHz for AM/SSB
+} Step;
+
+typedef struct
+{
+  uint8_t mode;     // Combination of RDS_* values
+  const char *desc; // Mode description
+} RDSMode;
+
+//
+// Global Variables
+//
+
+extern Band bands[];
+extern uint8_t memoryIdx;
+extern const TimeZone timeZones[];
+extern const char *bandModeDesc[];
+extern const FMRegion fmRegions[];
+extern const char *const fmStereoDesc[];
+extern const char *const sleepModeDesc[];
+extern const char *const uiLayoutDesc[];
+extern const char *const usbModeDesc[];
+extern const char *const tcpModeDesc[];
+extern const char *const bleModeDesc[];
+extern const char *const wifiModeDesc[];
+extern const RDSMode rdsMode[];
+extern int bandIdx;
+extern VfoState vfos[2];
+extern uint8_t vfoIdx;
+extern bool vfoInitialized;
+
+void initVfo();
+VfoState captureVfo();
+
+uint8_t seekMode(bool toggle = false);
+void drawSideBar(uint16_t cmd, int x, int y, int sx);
+bool doSideBar(uint16_t cmd, int16_t enc, int16_t enca);
+void doSelectDigit(int16_t enc);
+bool clickHandler(uint16_t cmd, bool shortPress);
+void selectBand(uint8_t idx, bool drawLoadingPatch = true);
+void applyFmStereo();
+int getTotalBands();
+int getTotalModes();
+int getTotalFMRegions();
+int getTotalFMStereoModes();
+int getTotalSleepModes();
+int getTotalUILayouts();
+int getTotalUSBModes();
+int getTotalTCPModes();
+int getTotalBluetoothModes();
+int getTotalWiFiModes();
+Band *getCurrentBand();
+uint8_t getFreqInputPos();
+int getFreqInputStep();
+const Step *getCurrentStep();
+const Bandwidth *getCurrentBandwidth();
+uint8_t getRDSMode();
+int getTotalRDSModes();
+
+int8_t getCurrentUTCOffset();
+
+// RESONIK
+extern uint8_t bandPlanIdx;
+int getTotalBandPlanModes();
+extern uint8_t autoAttIdx;
+extern uint8_t autoAttLevel;
+extern uint8_t menuStyleIdx;
+void autoAttReset();
+bool tuneToMemory(const Memory *memory);
+bool autoAttTick(uint8_t rssiNow);
+bool bandPlanAutoSideband();
+void bandPlanForget();
+extern uint8_t bandPlanArea;
+extern uint8_t freqLock;           // RESONIK R3: 1 = knob tuning locked
+extern uint8_t wifiPowerIdx;       // RESONIK R3: 0 Normal, 1 Low, 2 Lowest
+extern const char *const wifiPowerDesc[];
+extern uint8_t perfIdx;            // RESONIK R3: 0 Battery 80 MHz, 1 Balanced 160, 2 Fast 240
+void perfApply();                  // Set the processor speed from perfIdx
+extern const char *const bandPlanAreaDesc[];
+bool drawTileMenu();
+void tileMenuOpen();
+const lgfx::IFont *uiFont(bool small);   // Inter SemiBold, 15 px or 14 px
+void tileAfterClick(uint16_t prevCmd, bool shortPress);
+void tileReturnCancel();
+const TimeZone *getCurrentTimeZone();
+const char *getCurrentTimeZoneAbbr();
+uint8_t timeZoneFromLegacyIndex(uint8_t idx);
+int getTotalUTCOffsets();
+
+void doSoftMute(int16_t enc);
+void doAgc(int16_t enc);
+void doAvc(int16_t enc);
+void doFmRegion(int16_t enc);
+void doFmStereo(int16_t enc);
+void doRDSMode(int16_t enc);
+void doBandwidth(int16_t enc);
+void doVolume(int16_t enc);
+void doBrt(int16_t enc);
+void doCal(int16_t enc);
+void doStep(int16_t enc);
+void doMode(int16_t enc);
+void doBand(int16_t enc);
+
+// RESONIK R4: Web Control settings (Menu.cpp)
+void webMenuDef(String &json);
+void webMenuVals(String &json);
+bool webMenuSet(uint16_t cmd, int32_t value);
+void webMemoriesJson(String &json);
+bool webMemoryAction(char action, int slot);
+
+#endif // MENU_H

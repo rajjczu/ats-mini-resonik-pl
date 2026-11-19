@@ -1,0 +1,1284 @@
+// =================================
+// INCLUDE FILES
+// =================================
+
+#include "Common.h"
+#include <Wire.h>
+#include "Rotary.h"
+#include "Button.h"
+#include "Menu.h"
+#include "Memories.h"
+#include "Patches.h"
+#include "Draw.h"
+#include "Storage.h"
+#include "Themes.h"
+#include "Utils.h"
+#include "EIBI.h"
+#include "Remote.h"
+#include "BleMode.h"
+#include "TcpMode.h"
+#include "Splash.h"
+#include "Brand.h"
+#include "Resonik.h"
+#include "CwAudio.h"
+#include "Ft8.h"
+#include "Web.h"
+#include "WifiSetup.h"
+#include "WebControl.h"
+#include "Scope.h"
+#include <stdlib.h>
+#include <time.h>
+
+// SI473/5 and UI
+#define MIN_ELAPSED_TIME         5  // 300
+#define MIN_ELAPSED_RSSI_TIME  200  // RSSI check uses IN_ELAPSED_RSSI_TIME * 6 = 1.2s
+#define ELAPSED_COMMAND      10000  // time to turn off the last command controlled by encoder. Time to goes back to the VFO control // G8PTN: Increased time and corrected comment
+#define DEFAULT_VOLUME          35  // change it for your favorite sound volume
+#define DEFAULT_SLEEP            0  // Default sleep interval, range = 0 (off) to 255 in steps of 5
+#define RDS_CHECK_TIME         250  // Increased from 90
+#define SEEK_TIMEOUT        600000  // Max seek timeout (ms)
+#define SCHEDULE_CHECK_TIME   2000  // How often to identify the same frequency (ms)
+
+// =================================
+// CONSTANTS AND VARIABLES
+// =================================
+
+int8_t agcIdx = 0;
+uint8_t disableAgc = 0;
+int8_t agcNdx = 0;
+int8_t softMuteMaxAttIdx = 4;
+
+volatile bool seekStop = false; // G8PTN: Added flag to abort seeking on rotary encoder detection
+bool pushAndRotate = false;   // Combined physical/BLE gesture state for the display
+
+long elapsedRSSI = millis();
+long elapsedButton = millis();
+
+long lastStrengthCheck = millis();
+long lastRDSCheck = millis();
+long lastScheduleCheck = millis();
+
+long elapsedCommand = millis();
+volatile int16_t encoderCount = 0;
+volatile int16_t encoderCountAccel = 0;
+uint32_t currentFrequency;
+
+// AGC/ATTN index per mode (FM/AM/SSB)
+int8_t FmAgcIdx = 0;                    // Default FM  AGGON  : Range = 0 to 37, 0 = AGCON, 1 - 27 = ATTN 0 to 26
+int8_t AmAgcIdx = 0;                    // Default AM  AGCON  : Range = 0 to 37, 0 = AGCON, 1 - 37 = ATTN 0 to 36
+int8_t SsbAgcIdx = 0;                   // Default SSB AGCON  : Range = 0 to 1,  0 = AGCON,      1 = ATTN 0
+
+// AVC index per mode (AM/SSB)
+int8_t AmAvcIdx = 48;                   // Default AM  = 48 (as per AN332), range = 12 to 90 in steps of 2
+int8_t SsbAvcIdx = 48;                  // Default SSB = 48, range = 12 to 90 in steps of 2
+bool ssbAvcHold = false;                // Temporary; cleared when the band/mode is reinitialized
+bool autoAntennaCapacitor = false;      // Automatic antenna tuning on MW/LW bands
+
+// SoftMute index per mode (AM/SSB)
+int8_t AmSoftMuteIdx = 4;               // Default AM  = 4, range = 0 to 32
+int8_t SsbSoftMuteIdx = 4;              // Default SSB = 4, range = 0 to 32
+
+// Menu options
+uint8_t volume = DEFAULT_VOLUME;        // Volume, range = 0 (muted) - 63
+uint8_t currentSquelch[5] = {0};        // Squelch per mode: lower 7 bits = threshold, high bit selects SNR (1) vs RSSI (0)
+uint8_t FmRegionIdx = 0;                // FM Region
+
+uint16_t currentBrt = 130;              // Display brightness, range = 10 to 255 in steps of 5
+uint16_t currentSleep = DEFAULT_SLEEP;  // Display sleep timeout, range = 0 to 255 in steps of 5
+long elapsedSleep = millis();           // Display sleep timer
+bool zoomMenu = false;                  // Display zoomed menu item
+int8_t scrollDirection = 1;             // Menu scroll direction
+#if defined(LILYGO_SI473X)
+bool encoderHalfStep = true;             // T-Embed defaults to half-step decoding
+#else
+bool encoderHalfStep = false;            // Standard hardware defaults to full-step decoding
+#endif
+
+// Background screen refresh
+uint32_t background_timer = millis();   // Background screen refresh timer.
+
+//
+// Current parameters
+//
+uint16_t currentCmd  = CMD_NONE;
+uint8_t  currentMode = FM;
+
+uint8_t  rssi = 0;
+uint8_t  snr  = 0;
+
+//
+// Devices
+//
+Rotary encoder  = Rotary(ENCODER_PIN_B, ENCODER_PIN_A, encoderHalfStep);
+ButtonTracker pb1 = ButtonTracker();
+LGFX tft;
+LGFX_Sprite spr(&tft);
+SI4735_fixed rx;
+
+//
+// Hardware initialization and setup
+//
+void setup()
+{
+  // Keep the C library clock in UTC; display offsets are applied separately.
+  setenv("TZ", "UTC0", 1);
+  tzset();
+
+  // Enable serial port
+  Serial.begin(115200);
+
+  // Encoder pins. Enable internal pull-ups
+  pinMode(ENCODER_PUSH_BUTTON, INPUT_PULLUP);
+  pinMode(ENCODER_PIN_A, INPUT_PULLUP);
+  pinMode(ENCODER_PIN_B, INPUT_PULLUP);
+
+  // Initially disable the audio amplifier until the SI4732 has been setup,
+  // if the target board exposes a separate amplifier enable pin.
+  if(PIN_AMP_EN >= 0)
+  {
+    pinMode(PIN_AMP_EN, OUTPUT);
+    digitalWrite(PIN_AMP_EN, LOW);
+  }
+
+  // Firmware owns the mute pin so library power-up cannot release it
+  pinMode(AUDIO_MUTE, OUTPUT);
+  digitalWrite(AUDIO_MUTE, LOW); // Keep inactive until the hardware setting is loaded.
+
+  // Enable SI4732 VDD
+  pinMode(PIN_POWER_ON, OUTPUT);
+  digitalWrite(PIN_POWER_ON, HIGH);
+  delay(100);
+
+  // The line below may be necessary to setup I2C pins on ESP32
+  Wire.begin(ESP32_I2C_SDA, ESP32_I2C_SCL);
+
+  // TFT display brightness control (PWM)
+  // Note: At brightness levels below 100%, switching from the PWM may cause power spikes and/or RFI
+  ledcAttach(PIN_LCD_BL, 16000, 8);  // Pin assignment, 16kHz, 8-bit
+  ledcWrite(PIN_LCD_BL, 0);          // Default value 0%
+
+  // TFT display setup
+  tft.init();
+  tft.setRotation(3);
+
+  tft.fillScreen(TH.bg);
+  spr.setPsram(true);
+  spr.setColorDepth(16);
+  spr.createSprite(DISPLAY_WIDTH, DISPLAY_HEIGHT);
+  spr.setTextDatum(MC_DATUM);
+  spr.setFont(&lgfx::fonts::Orbitron_Light_24);
+  spr.setTextColor(TH.text, TH.bg);
+
+  // Press and hold Encoder button to force an preferences reset
+  // Note: preferences reset is recommended after firmware updates
+  if(digitalRead(ENCODER_PUSH_BUTTON)==LOW)
+  {
+    nvsErase();
+    diskInit(true);
+
+    ledcWrite(PIN_LCD_BL, 255);       // Default value 255 = 100%
+    tft.setTextSize(2);
+    tft.setTextColor(TH.text, TH.bg);
+    tft.println(getVersion(true));
+    tft.println();
+    tft.setTextColor(TH.text_warn, TH.bg);
+    tft.print("Resetting Preferences");
+    while(digitalRead(ENCODER_PUSH_BUTTON) == LOW) delay(100);
+  }
+
+  // Initialize flash file system
+  diskInit();
+
+  if(!ESP.getPsramSize() || !memoriesInit()) {
+    ledcWrite(PIN_LCD_BL, 255);       // Default value 255 = 100%
+    tft.setTextSize(2);
+    tft.setTextColor(TH.text_warn, TH.bg);
+    tft.println("PSRAM not detected");
+#ifdef CONFIG_SPIRAM_MODE_OCT
+    tft.println("(try the QSPI f/w version)");
+#else
+    tft.println("(try the OSPI f/w version)");
+#endif
+  while(1);
+  }
+
+  // Check for SI4732 connected on I2C interface
+  // If the SI4732 is not detected, then halt with no further processing
+  rx.setI2CFastModeCustom(800000UL);
+
+  // Looks for the I2C bus address and set it.  Returns 0 if error
+  int16_t si4735Addr = rx.getDeviceI2CAddress(RESET_PIN);
+  if(!si4735Addr)
+  {
+    ledcWrite(PIN_LCD_BL, 255);       // Default value 255 = 100%
+    tft.setTextSize(2);
+    tft.setTextColor(TH.text_warn, TH.bg);
+    tft.println("Si4732 not detected");
+    while(1);
+  }
+
+  rx.setup(RESET_PIN, MW_BAND_TYPE);
+  // Comment the line above and uncomment the three lines below if you are using external ref clock (active crystal or signal generator)
+  // rx.setRefClock(32768);
+  // rx.setRefClockPrescaler(1);   // will work with 32768
+  // rx.setup(RESET_PIN, 0, MW_BAND_TYPE, SI473X_ANALOG_AUDIO, XOSCEN_RCLK);
+
+  // If loading preferences fails...
+  if(!prefsLoad(SAVE_SETTINGS|SAVE_VERIFY))
+  {
+    // Save default preferences
+    prefsSave(SAVE_SETTINGS);
+    // Show initial screen with the QR code
+    spr.fillSprite(TH.bg);
+    ledcWrite(PIN_LCD_BL, currentBrt);
+    drawAboutHelp(0);
+    // Wait for an encoder click
+    while(digitalRead(ENCODER_PUSH_BUTTON)!=LOW) delay(100);
+    while(digitalRead(ENCODER_PUSH_BUTTON)==LOW) delay(100);
+  }
+
+  digitalWrite(AUDIO_MUTE, audioClamp ? HIGH : LOW);
+
+  // Processor speed from the Performance setting (RESONIK R3)
+  perfApply();
+
+  // Start a fresh countdown using the configured duration.
+  offTimerRestart();
+
+  // If loading memories fails, save default memories
+  bool memLoaded = prefsLoad(SAVE_MEMORIES|SAVE_VERIFY);
+  {
+    bool anyMem = false;
+    for(int i = 0; i < getTotalMemories(); i++)
+      if(getMemory(i).freq != 0) { anyMem = true; break; }
+    bool upgradeStarter = (!anyMem) || (strcmp(getMemory(0).name, "PR1 KRK") == 0 && getMemory(40).freq == 0);
+    if(upgradeStarter)
+    {
+      const Memory presets[] = {
+        // 01-15: Krakow & Malopolska FM (bez kolejnych FM)
+        {  89400000,  0, FM,  "PR1 KRK"   },
+        {  99400000,  0, FM,  "PR3 KRK"   },
+        { 101600000,  0, FM,  "R KRAKOW"  },
+        {  96000000,  0, FM,  "RMF FM"    },
+        { 104100000,  0, FM,  "RADIO ZET" },
+        {  96700000,  0, FM,  "RMF MAXX"  },
+        {  87800000,  0, FM,  "RMF CLASS" },
+        {  97700000,  0, FM,  "ESKA KRK"  },
+        { 101000000,  0, FM,  "ANTYRADIO" },
+        { 102900000,  0, FM,  "TOK FM"    },
+        {  92500000,  0, FM,  "ZLOTE PRZ" },
+        {  93700000,  0, FM,  "CHILLIZET" },
+        { 103800000,  0, FM,  "ROCK RAD"  },
+        { 107000000,  0, FM,  "VOX FM"    },
+        { 106100000,  0, FM,  "PLUS KRK"  },
+        // 16-25: CB Radio PL ("zera") & DX
+        {  27060000, 28, AM,  "CB CH09"   },
+        {  27180000, 28, AM,  "CB CH19"   },
+        {  27200000, 28, AM,  "CB CH20"   },
+        {  27250000, 28, AM,  "CB CH25"   },
+        {  27280000, 28, AM,  "CB CH28"   },
+        {  27300000, 28, AM,  "CB CH30"   },
+        {  27350000, 28, AM,  "CB CH35"   },
+        {  27400000, 28, AM,  "CB CH40"   },
+        {  27555000, 29, USB, "CB DX555"  },
+        {  26425000, 27, USB, "CB 26425"  },
+        // 26-40: Lotnictwo HF (VOLMET + MWARA EUR / NAT-A / NAT-B)
+        {   5450000, 33, USB, "RAF 5450"  },
+        {  11253000, 33, USB, "RAF 11253" },
+        {   3413000, 33, USB, "SHAN 3413" },
+        {   5505000, 33, USB, "SHAN 5505" },
+        {   8957000, 33, USB, "SHAN 8957" },
+        {  13264000, 33, USB, "SHAN13264" },
+        {   3479000, 33, USB, "EUR 3479"  },
+        {   5661000, 33, USB, "EUR 5661"  },
+        {   6598000, 33, USB, "EUR 6598"  },
+        {  10084000, 33, USB, "EUR 10084" },
+        {  13288000, 33, USB, "EUR 13288" },
+        {   5598000, 33, USB, "NATA 5598" },
+        {   8906000, 33, USB, "NATA 8906" },
+        {   5616000, 33, USB, "NATB 5616" },
+        {   8864000, 33, USB, "NATB 8864" },
+        // 41-52: Sluzby morskie, meteo RTTY/FAX, czas, specjalne
+        {    518000, 32, USB, "NAVTEX518" },
+        {    490000, 32, USB, "NAVTEX490" },
+        {   4209500, 12, USB, "NVTX 4209" },
+        {   4583000, 12, USB, "DWD 4583"  },
+        {   7646000, 10, USB, "DWD 7646"  },
+        {  10100800,  9, USB, "DWD 10100" },
+        {   3855000, 13, USB, "FAX 3855"  },
+        {   7880000, 10, USB, "FAX 7880"  },
+        {   4996000, 34, AM,  "RWM 4996"  },
+        {   9996000, 34, AM,  "RWM 9996"  },
+        {  10000000, 34, AM,  "WWV 10000" },
+        {   4625000, 12, USB, "UVB-76"    },
+        // 53-58: Fale dlugie i srednie (Polska / Europa)
+        {    225000, 31, AM,  "PR1 225k"  },
+        {    198000, 31, AM,  "BBC R4 LW" },
+        {    234000, 31, AM,  "RTL 234k"  },
+        {    639000, 16, AM,  "CRO 639k"  },
+        {    540000, 16, AM,  "KOSSUTH"   },
+        {   1386000, 16, AM,  "BALTIC138" },
+        // 59-72: Krotkofalowcy (SSB, CW, FT8, Radiolatarnie)
+        {   1840000, 18, USB, "FT8 160M"  },
+        {   3710000, 19, LSB, "80M SP"    },
+        {   3573000, 19, USB, "FT8 80M"   },
+        {   5357000, 30, USB, "FT8 60M"   },
+        {   7130000, 20, LSB, "40M EU"    },
+        {   7074000, 20, USB, "FT8 40M"   },
+        {   7020000, 20, CW,  "CW 40M"    },
+        {  10136000, 21, USB, "FT8 30M"   },
+        {  14200000, 22, USB, "20M DX"    },
+        {  14074000, 22, USB, "FT8 20M"   },
+        {  14100000, 22, CW,  "BCN 20M"   },
+        {  21225000, 24, USB, "15M DX"    },
+        {  21074000, 24, USB, "FT8 15M"   },
+        {  28400000, 26, USB, "10M DX"    },
+        // 73-82: Fale krotkie - rozglosnie miedzynarodowe
+        {   6070000, 11, AM,  "CH 292"    },
+        {   5980000, 11, AM,  "R ROMANIA" },
+        {   6160000, 11, AM,  "SHORTWAVE" },
+        {   7300000, 10, AM,  "SW 41M"    },
+        {   9410000,  9, AM,  "BBC WS"    },
+        {   9515000,  9, AM,  "KBS WORLD" },
+        {   9600000,  9, AM,  "CRI 9600"  },
+        {   9955000,  9, AM,  "WRMI 9955" },
+        {  11815000,  8, AM,  "NHK 11815" },
+        {  15450000,  6, AM,  "SW 19M"    },
+      };
+      for(int i = 0; i < (int)(sizeof(presets) / sizeof(presets[0])); i++)
+        setMemory(i, presets[i]);
+      prefsSave(SAVE_MEMORIES);
+    }
+    else if(!memLoaded) prefsSave(SAVE_MEMORIES);
+  }
+
+  // If loading bands fails, save default bands
+  if(!prefsLoad(SAVE_BANDS|SAVE_VERIFY)) prefsSave(SAVE_BANDS);
+
+  // Audio Amplifier Enable. G8PTN: Added
+  // After the SI4732 has been setup, enable the audio amplifier
+  if(PIN_AMP_EN >= 0) digitalWrite(PIN_AMP_EN, HIGH);
+
+  patchesInit();
+
+  // SI4732 STARTUP!
+  initVfo();
+
+  // CW decoder audio task (RESONIK R3), idle until the decoder is used
+  cwAudioInit();
+  delay(50);
+  rx.setVolume(volume);
+  rx.setMaxSeekTime(SEEK_TIMEOUT);
+
+  // Draw display for the first time
+  if(splashDraw())
+  {
+    // A custom splash image uploaded by the user takes precedence
+    ledcWrite(PIN_LCD_BL, currentBrt);
+    delay(3000);
+  }
+  else
+  {
+    // RESONIK boot screen
+    brandDrawBootScreen();
+    ledcWrite(PIN_LCD_BL, currentBrt);
+    delay(1500);
+  }
+  drawScreen();
+  ledcWrite(PIN_LCD_BL, currentBrt);
+
+  // Interrupt actions for Rotary encoder
+  // Note: Moved to end of setup to avoid inital interrupt actions
+  // ICACHE_RAM_ATTR void rotaryEncoder(); see rotaryEncoder implementation below.
+  attachInterrupt(digitalPinToInterrupt(ENCODER_PIN_A), rotaryEncoder, CHANGE);
+  attachInterrupt(digitalPinToInterrupt(ENCODER_PIN_B), rotaryEncoder, CHANGE);
+
+  // Connect WiFi, if necessary
+  netInit(wifiModeIdx);
+
+  // Start Bluetooth LE, if necessary
+  bleInit(bleModeIdx);
+}
+
+
+ICACHE_RAM_ATTR int16_t accelerateEncoder(int8_t dir)
+{
+  const uint32_t speedThresholds[] = {350, 60, 45, 35, 25}; // ms between clicks
+  const uint16_t accelFactors[] =      {1,  2,  4,  8, 16}; // corresponding multipliers
+  static uint32_t lastEncoderTime = 0;
+  static uint32_t lastSpeed = speedThresholds[0];
+  static uint8_t lastAccelIdx = 0;
+  static int8_t lastEncoderDir = 0;
+
+  uint32_t currentTime = millis();
+  lastSpeed = ((currentTime - lastEncoderTime) * 7 + lastSpeed * 3) / 10;
+
+  // Reset acceleration on timeout or direction change
+  if (lastSpeed > speedThresholds[0] || lastEncoderDir != dir) {
+    lastSpeed = speedThresholds[0];
+    lastAccelIdx = 0;
+  } else {
+    // Ramp up at once, ease down one level at a time so a single slow click
+    // in a fast spin does not drop straight back to 1x (after jokubasver)
+    uint8_t targetIdx = 0;
+    for (int8_t i = LAST_ITEM(speedThresholds); i >= 0; i--) {
+      if (lastSpeed <= speedThresholds[i]) { targetIdx = (uint8_t)i; break; }
+    }
+    if (targetIdx >= lastAccelIdx) lastAccelIdx = targetIdx;
+    else if (lastAccelIdx > 0) lastAccelIdx--;
+  }
+  lastEncoderTime = currentTime;
+  lastEncoderDir = dir;
+
+  // Apply acceleration with direction
+  return(dir * accelFactors[lastAccelIdx]);
+}
+
+//
+// Reads encoder via interrupt
+// Uses Rotary.h and Rotary.cpp implementation to process encoder via
+// interrupt. If you do not add ICACHE_RAM_ATTR declaration, the system
+// will reboot during attachInterrupt call. The ICACHE_RAM_ATTR macro
+// places this function into RAM.
+//
+ICACHE_RAM_ATTR void rotaryEncoder()
+{
+  // Rotary encoder events
+  uint8_t encoderStatus = encoder.process();
+  if(encoderStatus)
+  {
+    int8_t delta = encoderStatus==DIR_CW? 1 : -1;
+    int16_t accelDelta = accelerateEncoder(delta);
+
+    // Do not accumulate too many encoder steps if event loop doesn't consume them
+    if(abs(encoderCount) < 5)
+    {
+      encoderCount += delta;
+      encoderCountAccel += accelDelta;
+    }
+
+    // Reset the seek flag
+    seekStop = true;
+  }
+}
+
+void setEncoderHalfStep(bool enabled)
+{
+  noInterrupts();
+  encoder.setHalfStep(enabled);
+  encoderHalfStep = enabled;
+  encoderCount = 0;
+  encoderCountAccel = 0;
+  interrupts();
+}
+
+uint32_t consumeEncoderCounts()
+{
+  int16_t encCount, encCountAccel;
+  noInterrupts();
+  encCount = encoderCount;
+  encCountAccel = encoderCountAccel;
+  encoderCount = 0;
+  encoderCountAccel = 0;
+  interrupts();
+  return ((uint32_t)encCountAccel << 16) | ((uint16_t)encCount & 0xFFFF);
+}
+
+// Select the nearest point on the 28 kHz SSB tuning grid within the band.
+// Return receiver units: 10 kHz for FM, 1 kHz for AM/SSB.
+uint16_t getReceiverFrequency(uint32_t freq)
+{
+  if(isSSB())
+  {
+    const Band *band = getCurrentBand();
+    const uint32_t spacing = 2 * MAX_BFO;
+    // CW: the display shows the signal; listen cwPitch() below it to hear the tone
+    if(currentMode == CW) freq -= cwPitch();
+    freq = ((freq + MAX_BFO) / spacing) * spacing;
+    freq = constrain(freq, band->minimumFreq, band->maximumFreq);
+  }
+  return freqFromHz(freq, currentMode);
+}
+
+int getCurrentBFO()
+{
+  if(!isSSB()) return(0);
+  int32_t dial = (int32_t)currentFrequency - (currentMode == CW ? cwPitch() : 0);
+  return(dial - (int32_t)freqToHz(getReceiverFrequency(currentFrequency), currentMode));
+}
+
+static void applyBFO()
+{
+  const Band *band = getCurrentBand();
+  int calibration = ssbSideband(currentMode) == USB? band->usbCal : band->lsbCal;
+  rx.setSSBBfo(-(getCurrentBFO() + calibration));
+}
+
+//
+// RESONIK R4: switch between SSB bands and modes (LSB, USB, CW) without the
+// full setup. The chip stays in SSB with its patch; only the sideband, the
+// frequency, BFO, filter and step change. Saves about 0.2 s per change (band
+// plan Auto at segment edges, the FT8 page's band knob, Mode and Band menus).
+// Returns false when the full setup is needed.
+//
+static bool ssbChipReady = false;
+
+bool useBandFast(Band *band)
+{
+  if(!ssbChipReady || !isSSB() || !dspPatchLoaded()) return(false);
+  bool automatic = autoAntennaCapacitor &&
+    (band->bandType == MW_BAND_TYPE || band->bandType == LW_BAND_TYPE);
+  if(automatic) return(false);
+
+  uint16_t receiverFreq = getReceiverFrequency(band->currentFreq);
+  currentFrequency = band->currentFreq;
+  ssbAvcHold = false;
+
+  rx.setSsbFast(freqFromHz(band->minimumFreq, currentMode), freqFromHz(band->maximumFreq, currentMode),
+                ssbSideband(currentMode));
+  if(!rx.setFrequencyConfirmed(receiverFreq)) return(false);
+  applyBFO();
+  rx.setSeekAmLimits(freqFromHz(band->minimumFreq, currentMode), freqFromHz(band->maximumFreq, currentMode));
+
+  doStep(0);
+  doSoftMute(0);
+  doAgc(0);
+  doAvc(0);
+  rssi = 0;
+  snr  = 0;
+  return(true);
+}
+
+//
+// Switch radio to given band
+//
+void useBand(Band *band)
+{
+  ssbChipReady = false;
+  // Convert the saved Hz frequency to receiver units and restore SSB fine tuning.
+  currentMode = band->bandMode;
+  uint16_t receiverFreq = getReceiverFrequency(band->currentFreq);
+  currentFrequency = isSSB()? band->currentFreq : freqToHz(receiverFreq, currentMode);
+  // AM/FM discard fractions smaller than a receiver unit.
+  band->currentFreq = currentFrequency;
+  uint16_t minFreq = freqFromHz(band->minimumFreq, currentMode);
+  uint16_t maxFreq = freqFromHz(band->maximumFreq, currentMode);
+  ssbAvcHold = false;
+
+  if(band->bandMode==FM)
+  {
+    // rx.setMaxDelaySetFrequency(60);
+    rx.setFM(minFreq, maxFreq, receiverFreq, freqFromHz(getCurrentStep()->step, currentMode));
+    // rx.setTuneFrequencyAntennaCapacitor(0);
+    rx.setSeekFmLimits(minFreq, maxFreq);
+
+    // More sensitive seek thresholds
+    // https://github.com/pu2clr/SI4735/issues/7#issuecomment-810963604
+    rx.setSeekFmRssiThreshold(5); // default is 20
+    rx.setSeekFmSNRThreshold(2); // default is 3
+
+    rx.setFMDeEmphasis(fmRegions[FmRegionIdx].value);
+    applyFmStereo();
+    rx.RdsInit();
+    rx.setRdsConfig(getRDSMode()!=RDS_OFF, 2, 2, 2, 2);
+    rx.setGpioCtl(1, 0, 0);   // G8PTN: Enable GPIO1 as output
+    rx.setGpio(0, 0, 0);      // G8PTN: Set GPIO1 = 0
+  }
+  else
+  {
+    // rx.setMaxDelaySetFrequency(80);
+    if(band->bandMode==AM)
+    {
+      rx.setAM(minFreq, maxFreq, receiverFreq, freqFromHz(getCurrentStep()->step, currentMode));
+      // More sensitive seek thresholds
+      // https://github.com/pu2clr/SI4735/issues/7#issuecomment-810963604
+      rx.setSeekAmRssiThreshold(10); // default is 25
+      rx.setSeekAmSNRThreshold(3); // default is 5
+    }
+    else
+    {
+      // Configure SI4732 for SSB (SI4732 step not used, set to 0)
+      rx.setSSB(minFreq, maxFreq, receiverFreq, 0, ssbSideband(currentMode));
+      // Initialize SSB with automatic AVC and AFC disabled
+      rx.setSSBConfig(getCurrentBandwidth()->idx, 1, 0, 1, 0, 1);
+      // G8PTN: Commented out
+      //rx.setSsbSoftMuteMaxAttenuation(softMuteMaxAttIdx);
+    }
+
+    // Mode setup resets the capacitor; apply the selected policy afterward.
+    bool automatic = autoAntennaCapacitor &&
+      (band->bandType == MW_BAND_TYPE || band->bandType == LW_BAND_TYPE);
+    bool changed = rx.configureAntennaCapacitor(automatic);
+    bool tuned = changed ? rx.setFrequencyConfirmed(receiverFreq)
+                         : rx.waitFrequencyConfirmed(receiverFreq);
+    if(!tuned) return;
+    if(isSSB()) applyBFO();
+    ssbChipReady = isSSB();
+
+    // G8PTN: Enable GPIO1 as output
+    rx.setGpioCtl(1, 0, 0);
+    // G8PTN: Set GPIO1 = 1
+    rx.setGpio(1, 0, 0);
+    // Consider the range all defined current band
+    rx.setSeekAmLimits(minFreq, maxFreq);
+  }
+
+  // Set step and spacing based on mode (FM, AM, SSB)
+  doStep(0);
+  // Set softMuteMaxAttIdx based on mode (AM, SSB)
+  doSoftMute(0);
+  // Set disableAgc and agcNdx values based on mode (FM, AM , SSB)
+  doAgc(0);
+  // Set currentAVC values based on mode (AM, SSB)
+  doAvc(0);
+  // Wait a bit for things to calm down (RESONIK R4: 30 ms, was 100)
+  delay(30);
+  // Clear signal strength readings
+  rssi = 0;
+  snr  = 0;
+}
+
+//
+// Tune to a frequency in Hz. SSB uses a fixed tuning grid and a derived BFO.
+//
+bool updateFrequency(int64_t newFreq, bool wrap)
+{
+  Band *band = getCurrentBand();
+  if(newFreq < band->minimumFreq)
+  {
+    if(!wrap) return false; else newFreq = band->maximumFreq;
+  }
+  else if(newFreq > band->maximumFreq)
+  {
+    if(!wrap) return false; else newFreq = band->minimumFreq;
+  }
+
+  uint16_t receiverFreq = getReceiverFrequency(newFreq);
+  bool carrierChanged = !isSSB() || receiverFreq != getReceiverFrequency(currentFrequency);
+  if(carrierChanged && !rx.setFrequencyConfirmed(receiverFreq)) return false;
+
+  currentFrequency = isSSB()? newFreq : freqToHz(receiverFreq, currentMode);
+  // SSB: set the BFO straight after the carrier change, so the chip has the
+  // right offset the moment it unmutes, then AGC (less of a thump; after the
+  // jokubasver fork)
+  if(isSSB())
+  {
+    applyBFO();
+    if(carrierChanged) doAgc(0);
+  }
+  band->currentFreq = currentFrequency;
+  return true;
+}
+
+// This function is called by blocking operations that need a lightweight abort check.
+bool consumeAbortPending()
+{
+  if(seekStop)
+  {
+    seekStop = false;
+    return true;
+  }
+  if(bleConsumeAbortPending(bleModeIdx)) return true;
+  if(serialConsumeAbortPending(usbModeIdx)) return true;
+  if(tcpConsumeAbortPending(tcpModeIdx)) return true;
+  if(webConsumeAbortPending()) return true;
+
+  // Checking isPressed without debouncing because this helper is used from
+  // blocking operations that do not run the normal event loop often enough.
+  if(pb1.update(digitalRead(ENCODER_PUSH_BUTTON) == LOW, 0).isPressed)
+  {
+    // Wait till the button is released, otherwise the main loop will register a click
+    while(pb1.update(digitalRead(ENCODER_PUSH_BUTTON) == LOW).isPressed)
+      delay(100);
+    return true;
+  }
+
+  return false;
+}
+
+// This function is called by the seek function process.
+void showFrequencySeek(uint16_t freq)
+{
+  currentFrequency = freqToHz(freq, currentMode);
+  drawScreen();
+}
+
+//
+// RESONIK R4: Seek in SSB and CW. The SI4732 only seeks in AM and FM; the
+// original firmware moved one tuning step here. This steps the band 1 kHz
+// at a time with the sound muted, from the quietest reading so far, and stops
+// at the first point 4 dB above it (the chip's SNR is 0 in SSB, so it is not
+// used), at the band edge, after 200 kHz, or when a button is pressed.
+// Returns the frequency found (tuned there) or 0 (back at the start).
+// progress() is called every 5 kHz; seen[] (200) gets the readings.
+//
+uint32_t ssbSeek(int dir, void (*progress)(uint32_t hz), uint8_t *seen, int *count, uint8_t *threshold, uint8_t *why)
+{
+  const Band *band = getCurrentBand();
+  uint32_t cur = currentFrequency;
+  seekStop = false;
+  muteOn(MUTE_TEMP, true, !audioClamp);
+  rx.setSSBBfo(0);
+  uint8_t floorRssi = 255;
+  uint32_t f = (cur / 1000) * 1000, found = 0;
+  int n = 0;
+  *why = 2;                                  // 0 found, 1 stopped, 2 nothing in 200 kHz, 3 band edge
+  for(int i = 1; i <= 200; i++)
+  {
+    int64_t next = (int64_t)f + dir * 1000LL * i;
+    if(next < band->minimumFreq || next > band->maximumFreq) { *why = 3; break; }
+    if(consumeAbortPending()) { *why = 1; break; }
+    rx.setFrequencyConfirmed(freqFromHz((uint32_t)next, currentMode));
+    rx.getCurrentReceivedSignalQuality();
+    uint8_t r = rx.getCurrentRSSI();
+    if(seen && n < 200) seen[n] = r;
+    n++;
+    if(progress && !(i % 5)) progress((uint32_t)next);
+    if(r < floorRssi) floorRssi = r;
+    if(i <= 4) continue;                     // The first readings only set the floor
+    if(r >= floorRssi + 4) { found = next; *why = 0; break; }
+  }
+  if(count) *count = n;
+  if(threshold) *threshold = floorRssi + 4;
+  rx.setFrequencyConfirmed(getReceiverFrequency(cur));
+  currentFrequency = cur;
+  updateFrequency(found ? found : cur, false);
+  bandPlanAutoSideband();
+  muteOn(MUTE_TEMP, false, !audioClamp);
+  return(found);
+}
+
+static void seekShowProgress(uint32_t hz)
+{
+  uint32_t keep = currentFrequency;
+  currentFrequency = hz;
+  drawScreen();
+  currentFrequency = keep;
+}
+
+//
+// Handle encoder rotation in seek mode
+//
+bool doSeek(int16_t enc, int16_t enca)
+{
+  // Silence seek audio using the configured hardware mute method.
+  muteOn(MUTE_TEMP, true, !audioClamp);
+  if(seekMode() == SEEK_DEFAULT)
+  {
+    if(isSSB())
+    {
+      // R4: a real search (it was one tuning step, often 10 Hz)
+      int count; uint8_t thr, why;
+      if(!ssbSeek(enc > 0 ? 1 : -1, seekShowProgress, nullptr, &count, &thr, &why) && why != 1)
+        statusShow("Seek", why == 3 ? "Nothing above the noise, band edge" : "Nothing above the noise in 200 kHz");
+    }
+    else
+    {
+      // Clear stale parameters
+      clearStationInfo();
+      rssi = snr = 0;
+
+      // Clear only the encoder latch. Pending remote input cancels the seek
+      // and is consumed without executing its command.
+      seekStop = false;
+      uint32_t preSeekFreq = currentFrequency;
+      if(!consumeAbortPending())
+      {
+        uint32_t savedFrequency = currentFrequency;
+        rx.seekStationProgress(showFrequencySeek, consumeAbortPending, enc>0? 1 : 0);
+        uint32_t target = freqToHz(rx.getCurrentFrequency(), currentMode);
+        // A seek that ends outside the band would wrap to the far edge: stay put
+        // instead (upstream issue #165, fix from the mattafaak fork)
+        if(!isFreqInBand(getCurrentBand(), target)) target = preSeekFreq;
+        // Cancellation status can precede the final hardware frequency.
+        // Retune and confirm the reported position before accepting it.
+        currentFrequency = savedFrequency;
+        updateFrequency(target, true);
+      }
+    }
+  }
+  else if(seekMode() == SEEK_SCHEDULE && enc)
+  {
+    uint8_t hour, minute;
+    // Clock is valid because the above seekMode() call checks that
+    clockGetHM(&hour, &minute);
+
+    size_t offset = -1;
+    const StationSchedule *schedule = enc > 0 ?
+      eibiNext(freqFromHz(currentFrequency, currentMode), hour, minute, &offset) :
+      eibiPrev(freqFromHz(currentFrequency, currentMode), hour, minute, &offset);
+
+    if(schedule) updateFrequency(schedule->freq * 1000, false);
+  }
+
+  // Clear current station name and information
+  clearStationInfo();
+  // Check for named frequencies
+  identifyFrequency(currentFrequency);
+  // Will need a redraw
+  muteOn(MUTE_TEMP, false, !audioClamp);
+  return(true);
+}
+
+//
+// Handle tuning
+//
+bool doTune(int16_t enc)
+{
+  int32_t step = getCurrentStep()->step;
+  int32_t stepAdjust = currentFrequency % step;
+  if(currentMode == FM && step == 200000) stepAdjust = (stepAdjust + 100000) % step;
+  step = !stepAdjust? step : enc>0? step - stepAdjust : stepAdjust;
+  updateFrequency(currentFrequency + (int64_t)step * enc, true);
+
+  // Clear current station name and information
+  clearStationInfo();
+  // Check for named frequencies
+  identifyFrequency(currentFrequency);
+  // Band plan: usual sideband when entering a phone segment
+  bandPlanAutoSideband();
+  // Will need a redraw
+  return(true);
+}
+
+//
+// Rotate digit
+//
+bool doDigit(int16_t enc)
+{
+  bool updated = updateFrequency(currentFrequency + (int64_t)enc * getFreqInputStep(), false);
+
+  if (updated) {
+    // Clear current station name and information
+    clearStationInfo();
+    // Check for named frequencies
+    identifyFrequency(currentFrequency);
+    // Band plan: usual sideband when entering a phone segment
+    bandPlanAutoSideband();
+  }
+
+  // Will need a redraw
+  return(updated);
+}
+
+
+bool clickFreq(bool shortPress)
+{
+  if (shortPress) {
+    bool updated = updateFrequency(currentFrequency - currentFrequency % getFreqInputStep(), false);
+
+    if (updated) {
+      prefsRequestSave(SAVE_CUR_BAND);
+      // Clear current station name and information
+      clearStationInfo();
+      // Check for named frequencies
+      identifyFrequency(currentFrequency);
+    }
+    return true;
+  }
+  return false;
+}
+
+bool processRssiSnr()
+{
+  static uint32_t updateCounter = 0;
+  bool needRedraw = false;
+
+  rx.getCurrentReceivedSignalQuality();
+  int newRSSI = rx.getCurrentRSSI();
+  int newSNR = rx.getCurrentSNR();
+
+  // Apply squelch if the volume is not muted
+  uint8_t squelchValue = currentSquelch[currentMode] & 0x7f;
+  uint8_t squelchParam = (currentSquelch[currentMode] & 0x80)? newSNR:newRSSI;
+  if(squelchValue)
+  {
+    if(squelchParam >= squelchValue && muteOn(MUTE_SQUELCH))
+    {
+      muteOn(MUTE_SQUELCH, false);
+    }
+    else if(squelchParam < squelchValue && !muteOn(MUTE_SQUELCH))
+    {
+      muteOn(MUTE_SQUELCH, true);
+    }
+  }
+  else if(muteOn(MUTE_SQUELCH))
+  {
+    muteOn(MUTE_SQUELCH, false);
+  }
+
+  // G8PTN: Based on 1.2s interval, update RSSI & SNR
+  if(!(updateCounter++ & 7))
+  {
+    // Automatic attenuation follows the RSSI (AM only, see Menu.cpp)
+    needRedraw |= autoAttTick(newRSSI);
+
+    // Show RSSI status only if this condition has changed
+    if(newRSSI != rssi)
+    {
+      rssi = newRSSI;
+      needRedraw = true;
+    }
+    // Show SNR status only if this condition has changed
+    if(newSNR != snr)
+    {
+      snr = newSNR;
+      needRedraw = true;
+    }
+  }
+  return needRedraw;
+}
+
+// Shared by the physical encoder, BLE HID, and ad hoc R/r commands.
+bool handleRotation(int16_t enc, int16_t accelerated, bool pressed)
+{
+  if(!enc || (sleepOn() && sleepModeIdx == SLEEP_LOCKED)) return false;
+  // Band scanner: the knob sets the direction (right up, left down)
+  if(bandScanActive())
+  {
+    bandScanTurn(enc);
+    elapsedSleep = elapsedCommand = millis();
+    return true;
+  }
+  // Any encoder action stops the memory scanner and stays on that memory
+  if(memScanActive())
+  {
+    memScanStop();
+    elapsedSleep = elapsedCommand = millis();
+    return true;
+  }
+  bool changed = false;
+  if(pressed)
+  {
+    switch(currentCmd)
+    {
+      case CMD_NONE:
+        // Frequency lock (RESONIK R3): no digit tuning while locked
+        if(freqLock) { statusShow("Frequency locked", "Menu: Tuning > Freq Lock"); break; }
+        currentCmd = CMD_FREQ;
+        changed = true;
+        break;
+      case CMD_FREQ:
+        doSelectDigit(enc);
+        changed = true;
+        break;
+      case CMD_SEEK:
+        changed = doTune(enc);
+        prefsRequestSave(SAVE_CUR_BAND);
+        break;
+    }
+  }
+  else
+  {
+    switch(currentCmd)
+    {
+      case CMD_NONE:
+        // Frequency lock (RESONIK R3): the knob sets the volume instead
+        if(freqLock)
+        {
+          doVolume(enc);
+          char v[8];
+          snprintf(v, sizeof(v), "%d", volume);
+          statusShow("Locked: volume", v, 1200);
+          changed = true;
+          break;
+        }
+        changed = doTune(accelerated);
+        prefsRequestSave(SAVE_CUR_BAND);
+        break;
+      case CMD_SCAN:
+        changed = doTune(accelerated);
+        prefsRequestSave(SAVE_CUR_BAND);
+        break;
+      case CMD_CWDEC:
+      case CMD_RTTY:
+        // CW / RTTY decoder pages: the knob keeps tuning
+        changed = doTune(accelerated);
+        prefsRequestSave(SAVE_CUR_BAND);
+        break;
+      case CMD_SCOPE:
+        scopeTurn(enc);
+        changed = true;
+        break;
+      case CMD_WIFISETUP:
+        wifiSetupTurn(enc);
+        changed = true;
+        break;
+      case CMD_FT8:
+        // FT8 page: the knob steps through the FT8 bands
+        ft8Turn(enc);
+        changed = true;
+        break;
+      case CMD_FREQ:
+        changed = doDigit(enc);
+        prefsRequestSave(SAVE_CUR_BAND);
+        break;
+      case CMD_SEEK:
+        changed = doSeek(enc, accelerated);
+        prefsRequestSave(SAVE_CUR_BAND);
+        break;
+      default:
+        changed = doSideBar(currentCmd, enc, accelerated);
+        break;
+    }
+  }
+  elapsedSleep = elapsedCommand = millis();
+  return changed;
+}
+
+// Shared by the physical button, BLE HID, and ad hoc e/E commands.
+bool handleClick(bool shortPress)
+{
+  elapsedSleep = elapsedCommand = millis();
+  if(memScanActive() || bandScanActive())
+  {
+    memScanStop();
+    bandScanStop();
+    return true;
+  }
+  if(sleepOn())
+  {
+    if(currentSleep)
+      sleepOn(false);
+    else if(sleepModeIdx == SLEEP_UNLOCKED)
+    {
+      if(shortPress && currentCmd == CMD_NONE)
+        currentCmd = CMD_VOLUME;
+      else if(currentCmd == CMD_VOLUME)
+        clickHandler(currentCmd, shortPress);
+    }
+    else return false;
+  }
+  else
+  {
+    uint16_t prevCmd = currentCmd;
+    if(!clickHandler(currentCmd, shortPress))
+    {
+      if(currentCmd != CMD_NONE)
+        currentCmd = CMD_NONE;
+      else if(shortPress)
+      {
+        tileReturnCancel();
+        currentCmd = CMD_VOLUME;
+      }
+      else
+      {
+        tileMenuOpen();
+        currentCmd = CMD_MENU;
+      }
+    }
+    // A setting opened from the tile menu goes back to its page when done
+    tileAfterClick(prevCmd, shortPress);
+  }
+  // Waking the display or loading schedules can take time.
+  elapsedSleep = elapsedCommand = millis();
+  return true;
+}
+
+//
+// Main event loop
+//
+//
+// RESONIK test builds: loop timing diagnostics. With RESONIK_DIAG set, the
+// slowest part of the main loop over the last 3 s is shown in the top left
+// corner ("D 240 draw" = the screen drawing took 240 ms). Off in releases.
+//
+#ifdef RESONIK_DIAG
+// Slow loops are also kept in a log (RAM, last DIAG_LINES events) that the
+// web page serves as /diag.txt: time, loop length, the parts that took time,
+// and what the radio was doing (band, mode, frequency, menu, Wi-Fi, CPU).
+#define DIAG_SLOW_MS  80   // Log loops (or gaps between loops) this long
+#define DIAG_LINES   300
+#define DIAG_PARTS     6
+static uint32_t diagT, diagLoopT, diagLoopEndT, diagWorstMs, diagWorstLoopMs, diagWindow, diagCount;
+static const char *diagWorstName = "";
+static struct { const char *name; uint16_t ms; } diagParts[DIAG_PARTS];
+static uint8_t diagNParts;
+static char (*diagLog)[112] = nullptr;
+static uint32_t diagHead = 0;
+char diagText[32] = "";
+#define DIAG_T0 diagT = millis()
+#define DIAG_T1(name) diagPart(name, millis() - diagT)
+static void diagPart(const char *name, uint32_t d)
+{
+  if(d > diagWorstMs) { diagWorstMs = d; diagWorstName = name; }
+  if(d >= 5 && diagNParts < DIAG_PARTS) { diagParts[diagNParts].name = name; diagParts[diagNParts].ms = d > 65535 ? 65535 : d; diagNParts++; }
+}
+static void diagAdd(const char *kind, uint32_t ms)
+{
+  if(!diagLog) diagLog = (char (*)[112])heap_caps_calloc(DIAG_LINES, 112, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+  if(!diagLog) return;
+  char parts[48] = "";
+  int n = 0;
+  for(int i = 0; i < diagNParts && n < (int)sizeof(parts) - 12; i++)
+    n += snprintf(parts + n, sizeof(parts) - n, "%s%s=%u", i ? " " : "", diagParts[i].name, diagParts[i].ms);
+  Band *band = getCurrentBand();
+  snprintf(diagLog[diagHead % DIAG_LINES], 112, "%7lu.%01lu %-4s %5lu  %-26s %-6s %-3s %6u cmd%-3u wifi%u %3luMHz",
+    (unsigned long)(millis() / 1000), (unsigned long)(millis() / 100 % 10), kind, (unsigned long)ms, parts,
+    band ? band->bandName : "?", bandModeDesc[currentMode], currentFrequency, currentCmd, wifiModeIdx,
+    (unsigned long)getCpuFrequencyMhz());
+  diagHead++;
+  diagCount++;
+}
+void diagDump(String &out)
+{
+  out = "RESONIK test build diagnostics\n";
+  static const char *rr[] = { "unknown", "power on", "external", "software/update", "CRASH (panic)",
+    "CRASH (interrupt watchdog)", "CRASH (task watchdog)", "CRASH (watchdog)", "deep sleep", "BROWNOUT (low battery)", "SDIO" };
+  int r = (int)esp_reset_reason();
+  out += String("Reset reason ") + r + " " + (r >= 0 && r <= 10 ? rr[r] : "") + ", up " + String(millis() / 1000) + " s, free heap " + String(ESP.getFreeHeap()) + "\n";
+  {
+    extern bool ft8CaptureGet(const int16_t **data, uint32_t *n, char *info, size_t infoSize);
+    const int16_t *d; uint32_t n; char info[160];
+    if(ft8CaptureGet(&d, &n, info, sizeof(info))) out += String("Last FT8 slot kept: ") + info + " (download /ft8.wav)\n";
+  }
+  out += "Logged: main loop passes (loop) or gaps between passes (gap) of " + String(DIAG_SLOW_MS) + " ms or more\n";
+  out += "  time_s kind    ms  parts(ms)                  band   mod   freq menu wifi  cpu\n";
+  if(!diagLog || !diagHead) { out += "(nothing slow yet)\n"; return; }
+  for(uint32_t i = diagHead > DIAG_LINES ? diagHead - DIAG_LINES : 0; i < diagHead; i++)
+  {
+    out += diagLog[i % DIAG_LINES];
+    out += '\n';
+  }
+}
+static void diagLoopStart()
+{
+  diagLoopT = millis();
+  diagNParts = 0;
+  // Time spent outside loop() (other tasks holding the core)
+  if(diagLoopEndT && diagLoopT - diagLoopEndT >= DIAG_SLOW_MS) diagAdd("gap", diagLoopT - diagLoopEndT);
+}
+static void diagLoopEnd()
+{
+  uint32_t now = millis(), l = now - diagLoopT;
+  if(l > diagWorstLoopMs) diagWorstLoopMs = l;
+  if(l >= DIAG_SLOW_MS) diagAdd("loop", l);
+  if(now - diagWindow >= 3000)
+  {
+    snprintf(diagText, 32, "D %lu %s L%lu #%lu", (unsigned long)diagWorstMs, diagWorstName, (unsigned long)diagWorstLoopMs, (unsigned long)diagCount);
+    diagWorstMs = diagWorstLoopMs = 0; diagWorstName = ""; diagWindow = now;
+  }
+  diagLoopEndT = millis();
+}
+#else
+#define DIAG_T0
+#define DIAG_T1(name)
+void diagDump(String &out) { out = "Diagnostics are only in test builds\n"; }
+static inline void diagLoopStart() {}
+static inline void diagLoopEnd() {}
+#endif
+
+void loop()
+{
+  diagLoopStart();
+  webScreenshotTick();
+  offTimerTick();
+  bool needRedraw = false;
+  uint32_t encCounts = consumeEncoderCounts();
+  int16_t encCount = (int16_t)(encCounts & 0xFFFF);
+  int16_t encCountAccel = (int16_t)(encCounts >> 16);
+  ButtonTracker::State button = pb1.update(digitalRead(ENCODER_PUSH_BUTTON) == LOW);
+
+  if(encCount && sleepOn() && sleepModeIdx == SLEEP_LOCKED)
+    encCount = encCountAccel = 0;
+  // Keep gesture ownership separate: releasing one control must not clear
+  // a held gesture on the other, or affect physical long-press handling.
+  static bool physicalPushAndRotate = false;
+  if(encCount && button.isPressed) physicalPushAndRotate = true;
+  if(!button.isPressed) physicalPushAndRotate = false;
+
+  if(encCount)
+    { DIAG_T0; needRedraw |= handleRotation(encCount, encCountAccel, button.isPressed); DIAG_T1("knob"); }
+  else if(!physicalPushAndRotate && button.isLongPressed)
+  {
+    sleepOn(!sleepOn());
+    elapsedSleep = elapsedCommand = millis();
+  }
+  else if(!physicalPushAndRotate && (button.wasClicked || button.wasShortPressed))
+    { DIAG_T0; needRedraw |= handleClick(button.wasShortPressed); DIAG_T1("click"); }
+
+  // Each source executes independently, so simultaneous inputs are not lost.
+  { DIAG_T0; needRedraw |= serialLoop(usbModeIdx); needRedraw |= bleLoop(bleModeIdx); needRedraw |= tcpLoop(tcpModeIdx); DIAG_T1("usb/bt"); }
+  uint32_t currentTime = millis();
+  const bool heldRotation = physicalPushAndRotate || blePushAndRotate();
+  needRedraw |= heldRotation != pushAndRotate;
+  pushAndRotate = heldRotation;
+  if(pushAndRotate) elapsedSleep = elapsedCommand = currentTime;
+
+  // Disable commands control
+  if((currentTime - elapsedCommand) > ELAPSED_COMMAND)
+  {
+    if(currentCmd != CMD_NONE && currentCmd != CMD_SEEK && currentCmd != CMD_SCAN && currentCmd != CMD_MEMORY && currentCmd != CMD_CWDEC && currentCmd != CMD_RTTY && currentCmd != CMD_SCOPE && currentCmd != CMD_FT8 && currentCmd != CMD_WIFISETUP)
+    {
+      tileReturnCancel();
+      currentCmd = CMD_NONE;
+      needRedraw = true;
+    }
+
+    elapsedCommand = currentTime;
+  }
+
+  // Display sleep timeout
+  if(currentSleep && !sleepOn() && ((currentTime - elapsedSleep) > currentSleep * 1000))
+  {
+    sleepOn(true);
+    // CPU sleep can take long time, renew the timestamps
+    elapsedSleep = elapsedCommand = currentTime = millis();
+  }
+
+  if((currentTime - elapsedRSSI) > MIN_ELAPSED_RSSI_TIME)
+  {
+    { DIAG_T0; needRedraw |= processRssiSnr(); DIAG_T1("rssi"); }
+    elapsedRSSI = currentTime;
+  }
+
+  // Periodically check received RDS information
+  if((currentTime - lastRDSCheck) > RDS_CHECK_TIME)
+  {
+    { DIAG_T0; needRedraw |= (currentMode == FM) && checkRds(); DIAG_T1("rds"); }
+    lastRDSCheck = currentTime;
+  }
+
+  // Periodically check schedule
+  if((currentTime - lastScheduleCheck) > SCHEDULE_CHECK_TIME)
+  {
+    { DIAG_T0; needRedraw |= identifyFrequency(currentFrequency, true); DIAG_T1("eibi"); }
+    lastScheduleCheck = currentTime;
+  }
+
+  // Tick preferences time, saving changes when there has
+  // been no activity for a while
+  { DIAG_T0; prefsTickTime(); DIAG_T1("save"); }
+
+  // Apply queued web operations, then advance WiFi and time synchronization.
+  { DIAG_T0; needRedraw |= webTick(); DIAG_T1("web"); }
+  { DIAG_T0; needRedraw |= webControlTick(); DIAG_T1("wctl"); }
+  { DIAG_T0; needRedraw |= netTickTime(); DIAG_T1("wifi"); }
+
+  // Update clock display
+  needRedraw |= clockUpdate();
+
+  // RESONIK: beacon tracker, memory scanner and signal logger
+  { DIAG_T0; needRedraw |= beaconTick(); needRedraw |= memScanTick(); needRedraw |= bandScanTick(); needRedraw |= scopeTick(); DIAG_T1("scan"); }
+  { DIAG_T0; needRedraw |= loggerTick(); DIAG_T1("log"); }
+  { DIAG_T0; needRedraw |= cwAudioTick(); needRedraw |= ft8Tick(); needRedraw |= wifiSetupTick(); DIAG_T1("decod"); }
+
+  // Periodically refresh the main screen
+  // This covers the case where there is nothing else triggering a refresh
+  if(needRedraw) background_timer = currentTime;
+  if((currentTime - background_timer) > BACKGROUND_REFRESH_TIME)
+  {
+    if(currentCmd == CMD_NONE) needRedraw = true;
+    background_timer = currentTime;
+  }
+
+  // Expire status messages even when no other display content changes.
+  needRedraw |= statusTick(millis());
+
+  // Redraw screen if necessary
+  if(needRedraw) { DIAG_T0; drawScreen(); DIAG_T1("draw"); }
+
+  diagLoopEnd();
+  // Add a small default delay in the main loop
+  delay(5);
+}
