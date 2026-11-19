@@ -560,6 +560,18 @@ void drawScreen()
     return;
   }
 
+  if(currentCmd==CMD_DETECTED)
+  {
+    drawDetectedPage();
+    return;
+  }
+
+  if(currentCmd==CMD_WSPR)
+  {
+    drawWsprPage();
+    return;
+  }
+
   // Wi-Fi Setup page (RESONIK R4)
   if(currentCmd==CMD_WIFISETUP)
   {

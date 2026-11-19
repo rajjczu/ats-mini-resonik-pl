@@ -10,6 +10,7 @@
 #include "Memories.h"
 #include "Storage.h"
 #include "Resonik.h"
+#include "Scope.h"
 #include "Beacons.h"
 #include "CatKenwood.h"
 
@@ -244,6 +245,7 @@ bool memScanTick()
       if(now < memScanTimer) return(false);
       if(memScanHit())
       {
+        recordDetected(currentFrequency, currentMode, rssi);
         char line[32];
         Memory m = getMemory(memScanSlot);
         snprintf(line, sizeof(line), "Hold M%02d %.10s", memScanSlot + 1, m.name);
@@ -367,6 +369,7 @@ bool bandScanTick()
       if(bandScanSkip) bandScanSkip--;
       else if(memScanHit())
       {
+        recordDetected(currentFrequency, currentMode, rssi);
         bandScanState = BandScan::Hold;
         bandScanLastHit = bandScanHoldStart = now;
         bandScanTimer = now + 500;

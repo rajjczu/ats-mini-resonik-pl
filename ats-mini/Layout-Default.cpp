@@ -4,6 +4,7 @@
 #include "Menu.h"
 #include "Draw.h"
 #include "CwAudio.h"
+#include "Scope.h"
 
 void drawLayoutDefault()
 {
@@ -71,6 +72,8 @@ void drawLayoutDefault()
     // CW decoder strip (RESONIK R3) in place of the scale
     if(cwStripShown())
       drawCwStrip();
+    else if(bottomBarShown())
+      drawBottomBar();
     // Show radio text if present, else show frequency scale
     else if(*getRadioText() || *getProgramInfo())
       drawRadioText(STATUS_OFFSET_Y, STATUS_OFFSET_Y + 25);

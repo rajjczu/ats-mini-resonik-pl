@@ -66,6 +66,10 @@
 #define CMD_SCOPE      0x4600 // PL+: Full-screen Band Scope
 #define CMD_RTTY       0x4700 // PL+: Full-screen RTTY / NAVTEX decoder
 #define CMD_WEATHER    0x4800 // PL+: Live Krakow weather page
+#define CMD_DETECTED   0x4900 // PL+: Recently detected stations
+#define CMD_WSPR       0x4A00 // PL+: WSPR 2-min slot monitor
+#define CMD_BOTTOMBAR  0x4B00 // PL+: Bottom bar mode (Skala/Historia/MiniWidmo)
+#define CMD_DUALWATCH  0x4C00 // PL+: Dual-Watch VFO A/B
 
 // Band plan settings (RESONIK)
 #define BANDPLAN_OFF       0

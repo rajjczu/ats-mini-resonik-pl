@@ -42,6 +42,10 @@ struct WeatherInfo
   float pressureHpa = 0.0f;
   float windKmh = 0.0f;
   int code = 0;
+  bool aqValid = false;
+  float pm25 = 0.0f;
+  float pm10 = 0.0f;
+  int aqi = 0;
 };
 
 static WeatherInfo wxData;
@@ -112,12 +116,44 @@ bool weatherFetch()
         wxData.code = (int)(c + 0.5f);
         wxData.city = cityIdx;
         wxData.valid = true;
+        wxData.aqValid = false;
         wxFetched = millis();
         ok = true;
       }
     }
   }
   http.end();
+
+  if(ok)
+  {
+    snprintf(url, sizeof(url),
+             "https://air-quality-api.open-meteo.com/v1/air-quality?latitude=%s&longitude=%s"
+             "&current=pm2_5,pm10,european_aqi",
+             cities[cityIdx].lat, cities[cityIdx].lon);
+    if(http.begin(client, url))
+    {
+      http.setUserAgent(getUserAgent());
+      if(http.GET() == HTTP_CODE_OK)
+      {
+        String aqBody = http.getString();
+        const char *aqCur = strstr(aqBody.c_str(), "\"current\"");
+        if(aqCur)
+        {
+          float pm25 = 0, pm10 = 0, aqi = 0;
+          if(extractJsonFloat(aqCur, "\"pm2_5\"", &pm25) &&
+             extractJsonFloat(aqCur, "\"pm10\"", &pm10) &&
+             extractJsonFloat(aqCur, "\"european_aqi\"", &aqi))
+          {
+            wxData.pm25 = pm25;
+            wxData.pm10 = pm10;
+            wxData.aqi = (int)(aqi + 0.5f);
+            wxData.aqValid = true;
+          }
+        }
+      }
+      http.end();
+    }
+  }
   return ok;
 }
 
@@ -150,6 +186,8 @@ void drawWeatherPage()
   const uint16_t hdr = 0x09C9;
   const uint16_t yellow = 0xFFE0;
   const uint16_t cyan = 0x07FF;
+  const uint16_t green = 0x07E0;
+  const uint16_t red = 0xF800;
   const uint16_t muted = 0x9CD3;
 
   spr.fillSprite(deep);
@@ -182,36 +220,45 @@ void drawWeatherPage()
   }
   else
   {
-    char buf[48];
+    char buf[56];
     snprintf(buf, sizeof(buf), "%.1f C", wxData.tempC);
     spr.setTextDatum(TL_DATUM);
     spr.setTextColor(yellow);
-    spr.drawString(buf, 14, 40, &lgfx::fonts::FreeSansBold18pt7b);
+    spr.drawString(buf, 14, 38, &lgfx::fonts::FreeSansBold18pt7b);
 
     spr.setTextColor(0xFFFF);
-    spr.drawString(wmoDesc(wxData.code), 14, 78, uiFont(false));
+    spr.drawString(wmoDesc(wxData.code), 14, 74, uiFont(false));
 
     snprintf(buf, sizeof(buf), "Wilgotnosc: %d%%", wxData.humidity);
     spr.setTextColor(cyan);
-    spr.drawString(buf, 165, 42, uiFont(true));
+    spr.drawString(buf, 165, 38, uiFont(true));
 
     snprintf(buf, sizeof(buf), "Cisnienie: %.0f hPa", wxData.pressureHpa);
-    spr.drawString(buf, 165, 62, uiFont(true));
+    spr.drawString(buf, 165, 56, uiFont(true));
 
     snprintf(buf, sizeof(buf), "Wiatr: %.1f km/h", wxData.windKmh);
-    spr.drawString(buf, 165, 82, uiFont(true));
+    spr.drawString(buf, 165, 74, uiFont(true));
+
+    spr.drawFastHLine(10, 100, 300, hdr);
+    if(wxData.aqValid)
+    {
+      uint16_t aqiCol = (wxData.aqi <= 40) ? green : ((wxData.aqi <= 80) ? yellow : red);
+      snprintf(buf, sizeof(buf), "Powietrze AQI:%d  PM2.5:%.0f  PM10:%.0f",
+               wxData.aqi, wxData.pm25, wxData.pm10);
+      spr.setTextColor(aqiCol);
+      spr.drawString(buf, 14, 108, uiFont(true));
+    }
 
     const PropData *pd = propagationData();
-    spr.drawFastHLine(10, 108, 300, hdr);
     spr.setTextColor(muted);
     if(pd && pd->valid)
     {
       snprintf(buf, sizeof(buf), "Propagacja KF: SFI %d  K-idx %d", pd->sfi, pd->kIndex);
-      spr.drawString(buf, 14, 118, uiFont(true));
+      spr.drawString(buf, 14, 128, uiFont(true));
     }
     else
     {
-      spr.drawString("Propagacja KF: otworz Ham -> Propagacja", 14, 118, uiFont(true));
+      spr.drawString("Propagacja KF: Ham i SWL -> Propagacja", 14, 128, uiFont(true));
     }
   }
 

@@ -179,6 +179,10 @@ static const char *menu[] =
 #define MENU_ABOUT        33
 #define MENU_RTTY         34  // PL+: RTTY / NAVTEX decoder
 #define MENU_WEATHER      35  // PL+: Krakow weather
+#define MENU_DETECTED     36  // PL+: Recently detected stations
+#define MENU_WSPR         37  // PL+: WSPR monitor
+#define MENU_BOTTOMBAR    38  // PL+: Bottom bar mode
+#define MENU_DUALWATCH    39  // PL+: Dual-Watch VFO A/B
 // RESONIK R4: Wi-Fi mode, Wi-Fi Power and joining a network are one item,
 // "Wi-Fi" (MENU_WIFIMODE), which opens the Wi-Fi page (WifiSetup.cpp)
 
@@ -226,6 +230,10 @@ static const char *settings[] =
   "O Radiu",
   "RTTY/NVTX",
   "Pogoda",
+  "Wykryte",
+  "WSPR",
+  "Dolny Pasek",
+  "DualWatch",
 };
 
 //
@@ -256,6 +264,7 @@ static const TileEntry tileTuning[] =
   { TI_LOCK, TILE_SET | MENU_FREQLOCK },
   { TI_REGION, TILE_SET | MENU_FM_REGION }, { TI_RDS, TILE_SET | MENU_RDS },
   { TI_SCAN, MENU_SCAN }, { TI_SCAN, MENU_SCOPE }, { TI_SCANNER, MENU_SCANNER }, { TI_SEEK, MENU_SEEK }, { TI_STEP, MENU_STEP }, { TI_VFO, MENU_VFO },
+  { TI_VFO, TILE_SET | MENU_DUALWATCH },
 };
 static const TileEntry tileAudio[] =
 {
@@ -266,6 +275,7 @@ static const TileEntry tileAudio[] =
 static const TileEntry tileMemory[] =
 {
   { TI_MEMORY, MENU_MEMORY }, { TI_LOG, TILE_SET | MENU_LOGGER }, { TI_MEMSCAN, MENU_MEMSCAN },
+  { TI_MEMSCAN, TILE_SET | MENU_DETECTED },
 };
 static const TileEntry tileHam[] =
 {
@@ -275,7 +285,7 @@ static const TileEntry tileHam[] =
   { TI_CWSTRIP, TILE_SET | MENU_CWSTRIP }, { TI_FT8, TILE_SET | MENU_FT8 },
   { TI_DOWNLOAD, TILE_SET | MENU_LOADEIBI },
   { TI_GLOBE, TILE_SET | MENU_BPAREA }, { TI_PROP, TILE_SET | MENU_PROPAG },
-  { TI_PROP, TILE_SET | MENU_WEATHER },
+  { TI_PROP, TILE_SET | MENU_WEATHER }, { TI_FT8, TILE_SET | MENU_WSPR },
 };
 static const TileEntry tileDisplay[] =
 {
@@ -283,6 +293,7 @@ static const TileEntry tileDisplay[] =
   { TI_SCROLL, TILE_SET | MENU_SCROLL }, { TI_MOON, TILE_SET | MENU_SLEEPMODE },
   { TI_SLEEPTIMER, TILE_SET | MENU_SLEEP }, { TI_PALETTE, TILE_SET | MENU_THEME },
   { TI_LAYOUT, TILE_SET | MENU_UI }, { TI_ZOOM, TILE_SET | MENU_ZOOM },
+  { TI_LAYOUT, TILE_SET | MENU_BOTTOMBAR },
 };
 static const TileEntry tileSystem[] =
 {
@@ -1798,6 +1809,10 @@ static void clickSettings(int cmd, bool shortPress)
     case MENU_CWDEC:      cwPageOpen();               break;
     case MENU_RTTY:       rttyPageOpen();             break;
     case MENU_WEATHER:    weatherOpen();              break;
+    case MENU_DETECTED:   detectedOpen();             break;
+    case MENU_WSPR:       wsprOpen();                 break;
+    case MENU_BOTTOMBAR:  currentCmd = CMD_BOTTOMBAR; break;
+    case MENU_DUALWATCH:  currentCmd = CMD_DUALWATCH; break;
     case MENU_FT8:        ft8PageOpen();              break;
     case MENU_CWSTRIP:    currentCmd = CMD_CWSTRIP;   break;
     case MENU_PROPAG:
@@ -1871,6 +1886,12 @@ bool doSideBar(uint16_t cmd, int16_t enc, int16_t enca)
     case CMD_CWSTRIP:
       cwStripIdx = wrap_range(cwStripIdx, scrollDirection * enc, 0, 1);
       prefsRequestSave(SAVE_SETTINGS);
+      break;
+    case CMD_BOTTOMBAR:
+      bottomBarIdx = wrap_range(bottomBarIdx, scrollDirection * enc, 0, 2);
+      break;
+    case CMD_DUALWATCH:
+      dualWatchIdx = wrap_range(dualWatchIdx, scrollDirection * enc, 0, 1);
       break;
     case CMD_BPAREA:
       bandPlanArea = wrap_range(bandPlanArea, scrollDirection * enc, 0, BP_AREA_COUNT - 1);
@@ -1949,6 +1970,12 @@ bool clickHandler(uint16_t cmd, bool shortPress)
     case CMD_WEATHER:
       if(shortPress) currentCmd = CMD_NONE;
       else weatherOpen();
+      break;
+    case CMD_DETECTED:
+      detectedClick(shortPress);
+      break;
+    case CMD_WSPR:
+      wsprClick(shortPress);
       break;
     case CMD_WIFISETUP:
       wifiSetupClick(shortPress);
@@ -3002,6 +3029,8 @@ void drawSideBar(uint16_t cmd, int x, int y, int sx)
     case CMD_MENUSTYLE:  drawOptionList(settings[MENU_MENUSTYLE], menuStyleDesc, ITEM_COUNT(menuStyleDesc), menuStyleIdx, x, y, sx); break;
     case CMD_LOGGER:     drawOptionList(settings[MENU_LOGGER], loggerDesc, 5, loggerIdx, x, y, sx); break;
     case CMD_CWSTRIP:    drawOptionList(settings[MENU_CWSTRIP], cwStripDesc, 2, cwStripIdx, x, y, sx); break;
+    case CMD_BOTTOMBAR:  drawOptionList(settings[MENU_BOTTOMBAR], bottomBarDesc, 3, bottomBarIdx, x, y, sx); break;
+    case CMD_DUALWATCH:  drawOptionList(settings[MENU_DUALWATCH], dualWatchDesc, 2, dualWatchIdx, x, y, sx); break;
     case CMD_BPAREA:     drawOptionList(settings[MENU_BPAREA], bandPlanAreaDesc, BP_AREA_COUNT, bandPlanArea, x, y, sx); break;
     case CMD_KNOB:       drawOptionList(settings[MENU_KNOB], knobDesc, 2, encoderHalfStep ? 1 : 0, x, y, sx); break;
     case CMD_FREQLOCK:   drawOptionList(settings[MENU_FREQLOCK], freqLockDesc, 2, freqLock, x, y, sx); break;

@@ -1005,6 +1005,14 @@ bool handleRotation(int16_t enc, int16_t accelerated, bool pressed)
         weatherTurn(enc);
         changed = true;
         break;
+      case CMD_DETECTED:
+        detectedTurn(enc);
+        changed = true;
+        break;
+      case CMD_WSPR:
+        wsprTurn(enc);
+        changed = true;
+        break;
       case CMD_WIFISETUP:
         wifiSetupTurn(enc);
         changed = true;
@@ -1213,7 +1221,7 @@ void loop()
   // Disable commands control
   if((currentTime - elapsedCommand) > ELAPSED_COMMAND)
   {
-    if(currentCmd != CMD_NONE && currentCmd != CMD_SEEK && currentCmd != CMD_SCAN && currentCmd != CMD_MEMORY && currentCmd != CMD_CWDEC && currentCmd != CMD_RTTY && currentCmd != CMD_SCOPE && currentCmd != CMD_WEATHER && currentCmd != CMD_FT8 && currentCmd != CMD_WIFISETUP)
+    if(currentCmd != CMD_NONE && currentCmd != CMD_SEEK && currentCmd != CMD_SCAN && currentCmd != CMD_MEMORY && currentCmd != CMD_CWDEC && currentCmd != CMD_RTTY && currentCmd != CMD_SCOPE && currentCmd != CMD_WEATHER && currentCmd != CMD_DETECTED && currentCmd != CMD_WSPR && currentCmd != CMD_FT8 && currentCmd != CMD_WIFISETUP)
     {
       tileReturnCancel();
       currentCmd = CMD_NONE;
@@ -1264,7 +1272,7 @@ void loop()
   needRedraw |= clockUpdate();
 
   // RESONIK: beacon tracker, memory scanner and signal logger
-  { DIAG_T0; needRedraw |= beaconTick(); needRedraw |= memScanTick(); needRedraw |= bandScanTick(); needRedraw |= scopeTick(); DIAG_T1("scan"); }
+  { DIAG_T0; needRedraw |= beaconTick(); needRedraw |= memScanTick(); needRedraw |= bandScanTick(); needRedraw |= scopeTick(); needRedraw |= bottomBarTick(); needRedraw |= dualWatchTick(); needRedraw |= wsprTick(); DIAG_T1("scan"); }
   { DIAG_T0; needRedraw |= loggerTick(); DIAG_T1("log"); }
   { DIAG_T0; needRedraw |= cwAudioTick(); needRedraw |= ft8Tick(); needRedraw |= wifiSetupTick(); DIAG_T1("decod"); }
 
